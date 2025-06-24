@@ -3,10 +3,9 @@ import random
 import requests
 import aiohttp
 import asyncio
-import msgpack
 from tqdm import tqdm
 from pathlib import Path
-from local_ai.utils import compute_file_hash, async_extract_zip, async_move, async_rmtree
+from crypto_models.utils import compute_file_hash, async_extract_zip, async_move, async_rmtree
 
 # Constants
 GATEWAY_URL = "https://gateway.lighthouse.storage/ipfs/"

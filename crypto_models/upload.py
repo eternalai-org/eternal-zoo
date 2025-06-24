@@ -6,7 +6,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from lighthouseweb3 import Lighthouse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from local_ai.utils import compute_file_hash, compress_folder, extract_zip
+from crypto_models.utils import compute_file_hash, compress_folder, extract_zip
+
 load_dotenv()
 
 def upload_to_lighthouse(file_path: Path):

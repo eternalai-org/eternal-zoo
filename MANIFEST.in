@@ -1,3 +1,3 @@
 include README.md
-recursive-include local_ai/examples/templates/*.jinja
-recursive-include local_ai/examples/best_practices/*.json
+recursive-include crypto_models/examples/templates/*.jinja
+recursive-include crypto_models/examples/best_practices/*.json

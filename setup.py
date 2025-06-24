@@ -1,12 +1,12 @@
-from local_ai import __version__
+from crypto_models import __version__
 from setuptools import setup, find_packages
 
 setup(
-    name="local_ai",
+    name="CryptoModels",
     version=__version__,
     packages=find_packages(),
     package_data={
-        "local_ai": [
+        "crypto_models": [
             "examples/templates/*.jinja",
             "examples/best_practices/*.json",
         ],
@@ -32,7 +32,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "local-ai = local_ai.cli:main",
+            "eai = crypto_models.cli:main",
         ],
     },
     author="EternalAI",

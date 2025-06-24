@@ -69,31 +69,31 @@ We've prepared several models for you to test with. Each model is listed with it
 - Size: 649 MB
 - RAM Required: 1.16 GB
 - CID: `bafkreiacd5mwy4a5wkdmvxsk42nsupes5uf4q3dm52k36mvbhgdrez422y`
-- Command: `local-ai start --hash bafkreiacd5mwy4a5wkdmvxsk42nsupes5uf4q3dm52k36mvbhgdrez422y`
+- Command: `eai model run --hash bafkreiacd5mwy4a5wkdmvxsk42nsupes5uf4q3dm52k36mvbhgdrez422y`
 
 **Qwen3-4B-Q8**
 - Size: 4.28 GB
 - RAM Required: 9.5 GB
 - CID: `bafkreiekokvzioogj5hoxgxlorqvbw2ed3w4mwieium5old5jq3iubixza`
-- Command: `local-ai start --hash bafkreiekokvzioogj5hoxgxlorqvbw2ed3w4mwieium5old5jq3iubixza`
+- Command: `eai model run --hash bafkreiekokvzioogj5hoxgxlorqvbw2ed3w4mwieium5old5jq3iubixza`
 
 **Qwen3-8B-Q6**
 - Size: 6.21 GB
 - RAM Required: 12 GB
 - CID: `bafkreid5z4lddvv4qbgdlz2nqo6eumxwetwmkpesrumisx72k3ahq73zpy`
-- Command: `local-ai start --hash bafkreid5z4lddvv4qbgdlz2nqo6eumxwetwmkpesrumisx72k3ahq73zpy`
+- Command: `eai model run --hash bafkreid5z4lddvv4qbgdlz2nqo6eumxwetwmkpesrumisx72k3ahq73zpy`
 
 **Qwen3-14B-Q8**
 - Size: 15.7 GB
 - RAM Required: 19.5 GB
 - CID: `bafkreiclwlxc56ppozipczuwkmgnlrxrerrvaubc5uhvfs3g2hp3lftrwm`
-- Command: `local-ai start --hash bafkreiclwlxc56ppozipczuwkmgnlrxrerrvaubc5uhvfs3g2hp3lftrwm`
+- Command: `eai model run --hash bafkreiclwlxc56ppozipczuwkmgnlrxrerrvaubc5uhvfs3g2hp3lftrwm`
 
 **Qwen3-30B-A3B-Q8**
 - Size: 31 GB
 - RAM Required: 37.35 GB
 - CID: `bafkreieroiopteqmtbjadlnpq3qkakdu7omvtuavs2l2qbu46ijnfdo2ly`
-- Command: `local-ai start --hash bafkreieroiopteqmtbjadlnpq3qkakdu7omvtuavs2l2qbu46ijnfdo2ly`
+- Command: `eai model run --hash bafkreieroiopteqmtbjadlnpq3qkakdu7omvtuavs2l2qbu46ijnfdo2ly`
 
 #### 👁️ Gemma3 Series (Vision Support)
 [Learn more about Gemma3](https://deepmind.google/models/gemma/gemma-3/)
@@ -102,19 +102,19 @@ We've prepared several models for you to test with. Each model is listed with it
 - Size: 3.16 GB
 - RAM Required: 7.9 GB
 - CID: `bafkreiaevddz5ssjnbkmdrl6dzw5sugwirzi7wput7z2ttcwnvj2wiiw5q`
-- Command: `local-ai start --hash bafkreiaevddz5ssjnbkmdrl6dzw5sugwirzi7wput7z2ttcwnvj2wiiw5q`
+- Command: `eai model run --hash bafkreiaevddz5ssjnbkmdrl6dzw5sugwirzi7wput7z2ttcwnvj2wiiw5q`
 
 **Gemma-12B-IT-Q4**
 - Size: 8.07 GB
 - RAM Required: 21.46 GB
 - CID: `bafkreic2bkjuu3fvdoxnvusdt4in6fa6lubzhtjtmcp2zvokvfjpyndakq`
-- Command: `local-ai start --hash bafkreic2bkjuu3fvdoxnvusdt4in6fa6lubzhtjtmcp2zvokvfjpyndakq`
+- Command: `eai model run --hash bafkreic2bkjuu3fvdoxnvusdt4in6fa6lubzhtjtmcp2zvokvfjpyndakq`
 
 **Gemma-27B-IT-Q4**
 - Size: 17.2 GB
 - RAM Required: 38.0 GB
 - CID: `bafkreihi2cbsgja5dwa5nsuixicx2x3gbcnh7gsocxbmjxegtewoq2syve`
-- Command: `local-ai start --hash bafkreihi2cbsgja5dwa5nsuixicx2x3gbcnh7gsocxbmjxegtewoq2syve`
+- Command: `eai model run --hash bafkreihi2cbsgja5dwa5nsuixicx2x3gbcnh7gsocxbmjxegtewoq2syve`
 
 ## 💻 Using the API
 
@@ -177,7 +177,7 @@ curl -X POST http://localhost:8080/v1/embeddings \
 
 ### Uploading Custom Models
 
-You can use `local-ai upload` to upload your own `gguf` models downloaded from [Huggingface](https://huggingface.co/) for deploying to the CryptoAgents platform.
+You can use `eai model preserve` to upload your own `gguf` models downloaded from [Huggingface](https://huggingface.co/) for deploying to the CryptoAgents platform.
 
 #### Model Preparation
 
@@ -256,14 +256,14 @@ npx @huggingface/gguf qwen3-8b-q8/qwen3-8b-q8 --context 32768
 **Basic Upload:**
 ```bash
 export LIGHTHOUSE_API_KEY=your_api_key
-local-ai upload --folder-name qwen3-8b-q8
+eai model preserve --folder-path qwen3-8b-q8
 ```
 
 **Advanced Upload with Metadata:**
 ```bash
 export LIGHTHOUSE_API_KEY=your_api_key
-local-ai upload \
-  --folder-name qwen3-8b-q8 \
+eai model preserve \
+  --folder-path qwen3-8b-q8 \
   --task chat \
   --ram 12 \
   --hf-repo Qwen/Qwen3-8B-GGUF \
@@ -276,8 +276,8 @@ local-ai upload \
 **Upload for Embedding Models:**
 ```bash
 export LIGHTHOUSE_API_KEY=your_api_key
-local-ai upload \
-  --folder-name qwen3-embedding-0.6b-q8 \
+eai model preserve \
+  --folder-path qwen3-embedding-0.6b-q8 \
   --task embed \
   --ram 1.16 \
   --hf-repo Qwen/Qwen3-Embedding-0.6B-GGUF \
@@ -288,7 +288,7 @@ local-ai upload \
 
 | Option | Description | Default | Required |
 |--------|-------------|---------|----------|
-| `--folder-name` | Folder containing the model files | - | ✅ |
+| `--folder-path` | Folder containing the model files | - | ✅ |
 | `--task` | Task type: `chat` for text generation models, `embed` for embedding models | `chat` | ❌ |
 | `--ram` | RAM usage in GB at 32768 context length | - | ❌ |
 | `--hf-repo` | Hugging Face repository (e.g., `Qwen/Qwen3-8B-GGUF`) | - | ❌ |

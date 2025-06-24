@@ -12,22 +12,22 @@ import pkg_resources
 from pathlib import Path
 from loguru import logger
 from typing import Optional, Dict, Any
-from local_ai.utils import wait_for_health
-from local_ai.download import download_model_from_filecoin_async
+from crypto_models.utils import wait_for_health
+from crypto_models.download import download_model_from_filecoin_async
 
-class LocalAIServiceError(Exception):
+class CryptoAgentsServiceError(Exception):
     """Base exception for Local AI service errors."""
     pass
 
-class ServiceStartError(LocalAIServiceError):
+class ServiceStartError(CryptoAgentsServiceError):
     """Exception raised when service fails to start."""
     pass
 
-class ModelNotFoundError(LocalAIServiceError):
+class ModelNotFoundError(CryptoAgentsServiceError):
     """Exception raised when model file is not found."""
     pass
 
-class LocalAIManager:
+class CryptoModelsManager:
     """Manages a local AI service with optimized performance."""
     
     # Performance constants
@@ -38,12 +38,12 @@ class LocalAIManager:
     MAX_PORT_RETRIES = 5
     
     def __init__(self):
-        """Initialize the LocalAIManager with optimized defaults."""       
+        """Initialize the CryptoModelsManager with optimized defaults."""       
         self.msgpack_file = Path(os.getenv("RUNNING_SERVICE_FILE", "running_service.msgpack"))
         self.loaded_models: Dict[str, Any] = {}
         self.llama_server_path = os.getenv("LLAMA_SERVER")
         if not self.llama_server_path or not os.path.exists(self.llama_server_path):
-            raise LocalAIServiceError("llama-server executable not found in LLAMA_SERVER or PATH")
+            raise CryptoAgentsServiceError("llama-server executable not found in LLAMA_SERVER or PATH")
         self.start_lock_file = Path(os.getenv("START_LOCK_FILE", "start_lock.lock"))
         self.logs_dir = Path("logs")
         self.logs_dir.mkdir(exist_ok=True)
@@ -294,7 +294,7 @@ class LocalAIManager:
                 # start the FastAPI app in the background           
                 uvicorn_command = [
                     "uvicorn",
-                    "local_ai.apis:app",
+                    "crypto_models.apis:app",
                     "--host", host,
                     "--port", str(port),
                     "--log-level", "info"
@@ -837,7 +837,7 @@ class LocalAIManager:
 
     def _get_model_template_path(self, model_family: str) -> str:
         """Get the template path for a specific model family."""
-        chat_template_path = pkg_resources.resource_filename("local_ai", f"examples/templates/{model_family}.jinja")
+        chat_template_path = pkg_resources.resource_filename("crypto_models", f"examples/templates/{model_family}.jinja")
         # check if the template file exists
         if not os.path.exists(chat_template_path):
             return None
@@ -845,7 +845,7 @@ class LocalAIManager:
 
     def _get_model_best_practice_path(self, model_family: str) -> str:
         """Get the best practices for a specific model family."""
-        best_practice_path = pkg_resources.resource_filename("local_ai", f"examples/best_practices/{model_family}.json")
+        best_practice_path = pkg_resources.resource_filename("crypto_models", f"examples/best_practices/{model_family}.json")
         # check if the best practices file exists
         if not os.path.exists(best_practice_path):
             return None
@@ -1176,13 +1176,13 @@ class LocalAIManager:
     def get_service_info(self) -> Dict[str, Any]:
         """Get service info from msgpack file with error handling."""
         if not os.path.exists(self.msgpack_file):
-            raise LocalAIServiceError("Service information not available")
+            raise CryptoAgentsServiceError("Service information not available")
         
         try:
             with open(self.msgpack_file, "rb") as f:
                 return msgpack.load(f)
         except Exception as e:
-            raise LocalAIServiceError(f"Failed to load service info: {str(e)}")
+            raise CryptoAgentsServiceError(f"Failed to load service info: {str(e)}")
     
     def update_service_info(self, updates: Dict[str, Any]) -> bool:
         """Update service information in the msgpack file."""
