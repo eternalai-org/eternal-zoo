@@ -139,27 +139,27 @@ log_message "llama.cpp setup complete."
 
 
 # Step 6: Create and activate virtual environment
-log_message "Creating virtual environment 'local_ai'..."
-"$PYTHON_CMD" -m venv local_ai || handle_error $? "Failed to create virtual environment"
+log_message "Creating virtual environment 'cryptomodels'..."
+"$PYTHON_CMD" -m venv cryptomodels || handle_error $? "Failed to create virtual environment"
 
 log_message "Activating virtual environment..."
-source local_ai/bin/activate || handle_error $? "Failed to activate virtual environment"
+source cryptomodels/bin/activate || handle_error $? "Failed to activate virtual environment"
 log_message "Virtual environment activated."
 
 
-# Step 7: Install local-ai toolkit
-log_message "Setting up local-ai toolkit..."
-if pip show local-ai &>/dev/null; then
-    log_message "local-ai is installed. Checking for updates..."
+# Step 7: Install cryptomodels toolkit
+log_message "Setting up cryptomodels toolkit..."
+if pip show cryptomodels &>/dev/null; then
+    log_message "cryptomodels is installed. Checking for updates..."
     
     # Get installed version
-    INSTALLED_VERSION=$(pip show local-ai | grep Version | awk '{print $2}')
+    INSTALLED_VERSION=$(pip show cryptomodels | grep Version | awk '{print $2}')
     log_message "Current version: $INSTALLED_VERSION"
     
     # Get remote version (from GitHub repository without installing)
     log_message "Checking latest version from repository..."
     TEMP_VERSION_FILE=$(mktemp)
-    if curl -s https://raw.githubusercontent.com/eternalai-org/local-ai/main/local_ai/__init__.py | grep -o "__version__ = \"[0-9.]*\"" | cut -d'"' -f2 > "$TEMP_VERSION_FILE"; then
+    if curl -s https://raw.githubusercontent.com/eternalai-org/CryptoModels/main/crypto_models/__init__.py | grep -o "__version__ = \"[0-9.]*\"" | cut -d'"' -f2 > "$TEMP_VERSION_FILE"; then
         REMOTE_VERSION=$(cat "$TEMP_VERSION_FILE")
         rm "$TEMP_VERSION_FILE"
         
@@ -168,22 +168,22 @@ if pip show local-ai &>/dev/null; then
         # Compare versions
         if [ "$(printf '%s\n' "$INSTALLED_VERSION" "$REMOTE_VERSION" | sort -V | head -n1)" = "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "$REMOTE_VERSION" ]; then
             log_message "New version available. Updating..."
-            pip uninstall local-ai -y || handle_error $? "Failed to uninstall local-ai"
-            pip install -q git+https://github.com/eternalai-org/local-ai.git || handle_error $? "Failed to update local-ai toolkit"
-            log_message "local-ai toolkit updated to version $REMOTE_VERSION."
+            pip uninstall cryptomodels -y || handle_error $? "Failed to uninstall cryptomodels"
+            pip install -q git+https://github.com/eternalai-org/CryptoModels.git || handle_error $? "Failed to update cryptomodels toolkit"
+            log_message "cryptomodels toolkit updated to version $REMOTE_VERSION."
         else
             log_message "Already running the latest version. No update needed."
         fi
     else
         log_message "Could not check latest version. Proceeding with update to be safe..."
-        pip uninstall local-ai -y || handle_error $? "Failed to uninstall local-ai"
-        pip install -q git+https://github.com/eternalai-org/local-ai.git || handle_error $? "Failed to update local-ai toolkit"
-        log_message "local-ai toolkit updated."
+        pip uninstall cryptomodels -y || handle_error $? "Failed to uninstall cryptomodels"
+        pip install -q git+https://github.com/eternalai-org/CryptoModels.git || handle_error $? "Failed to update cryptomodels toolkit"
+        log_message "cryptomodels toolkit updated."
     fi
 else
-    log_message "Installing local-ai toolkit..."
-    pip install -q git+https://github.com/eternalai-org/local-ai.git || handle_error $? "Failed to install local-ai toolkit"
-    log_message "local-ai toolkit installed."
+    log_message "Installing cryptomodels toolkit..."
+    pip install -q git+https://github.com/eternalai-org/CryptoModels.git || handle_error $? "Failed to install cryptomodels toolkit"
+    log_message "cryptomodels toolkit installed."
 fi
 
 log_message "Setup completed successfully."

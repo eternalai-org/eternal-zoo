@@ -1,7 +1,9 @@
 # 🚀 CryptoModels: Sovereign Weights
+![Sovereign Weights](./images/sovereign_weights.jpg)
+
 ## Deploy AI Models to CryptoAgents
 
-This guide will help you deploy your AI models to the CryptoAgents platform using decentralized infrastructure. Whether you're a developer or AI enthusiast, you'll learn how to run your models with complete sovereignty - maintaining full control over your AI weights through decentralized storage and private local execution with the EAI (EternalAI) command-line tool.
+This guide will help you deploy your AI models using decentralized infrastructure. Whether you're a developer or AI enthusiast, you'll learn how to run your models with complete sovereignty - maintaining full control over your AI weights through decentralized storage and private local execution with the CryptoModels command-line tool.
 
 ## 📑 Table of Contents
 - [Key Features](#-key-features)
@@ -41,7 +43,7 @@ This guide will help you deploy your AI models to the CryptoAgents platform usin
 
 ### Why Sovereign Weights Matter
 
-In an era of increasing AI centralization, EAI puts you back in control:
+In an era of increasing AI centralization, CryptoModels puts you back in control:
 
 - **Own Your Models**: Models are stored on decentralized infrastructure, not controlled by any single entity
 - **Private by Design**: All inference happens locally on your hardware - no external API calls, no data collection
@@ -63,19 +65,29 @@ In an era of increasing AI centralization, EAI puts you back in control:
 
 ### Installation
 
-#### For macOS:
+#### For macOS (Using Setup Script):
 ```bash
 bash mac.sh
 ```
 > **Note**: You'll need `llama.cpp.rb` in the same directory as `mac.sh`
 
+#### Alternative Installation (Direct):
+```bash
+# Create virtual environment
+python3 -m venv cryptomodels
+source cryptomodels/bin/activate
+
+# Install CryptoModels
+pip install git+https://github.com/eternalai-org/CryptoModels.git
+```
+
 ### Setting Up Your Environment
 
 1. Activate the virtual environment:
 ```bash
-source local_ai/bin/activate
+source cryptomodels/bin/activate
 ```
-> **Remember**: Activate this environment each time you use the `eai` tools
+> **Remember**: Activate this environment each time you use the CryptoModels (`eai`) tools
 
 2. Verify your installation:
 ```bash
@@ -84,7 +96,7 @@ eai --version
 
 ## 📖 CLI Overview
 
-EAI uses a structured command hierarchy for better organization. All model operations are grouped under the `model` subcommand:
+CryptoModels uses a structured command hierarchy for better organization. All model operations are grouped under the `model` subcommand:
 
 ```bash
 # Model operations
@@ -303,7 +315,7 @@ eai model preserve \
   --hf-file Qwen3-8B-Q8_0.gguf \
   --zip-chunk-size 512 \
   --threads 16 \
-  --max-retries 20
+  --max-retries 5
 ```
 
 **Upload for Embedding Models:**
@@ -328,7 +340,7 @@ eai model preserve \
 | `--hf-file` | Original Hugging Face filename | - | ❌ |
 | `--zip-chunk-size` | Compression chunk size in MB | 512 | ❌ |
 | `--threads` | Number of compression threads | 16 | ❌ |
-| `--max-retries` | Maximum upload retry attempts | 20 | ❌ |
+| `--max-retries` | Maximum upload retry attempts | 5 | ❌ |
 
 #### Upload Process
 
