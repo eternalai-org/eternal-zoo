@@ -7,6 +7,7 @@ from crypto_models import __version__
 from crypto_models.core import CryptoModelsManager
 from crypto_models.upload import upload_folder_to_lighthouse
 from crypto_models.download import download_model_from_filecoin_async
+from crypto_models.preseved_models import PRESERVED_MODELS
 
 manager = CryptoModelsManager()
 
@@ -33,10 +34,17 @@ def parse_args():
     run_command = model_subparsers.add_parser(
         "run", help="Run a local language model server"
     )
+    
+    # Add positional argument for model name
     run_command.add_argument(
-        "--hash", type=str, required=True,
-        help="Filecoin hash of the model to run"
+        "model_name", nargs='?', 
+        help="Model name (e.g., qwen3-1.7b) - will be mapped to hash automatically"
     )
+    run_command.add_argument(
+        "--hash", type=str,
+        help="Filecoin hash of the model to run (alternative to model name)"
+    )
+    
     run_command.add_argument(
         "--port", type=int, default=8080,
         help="Port number for the local language model server"
@@ -125,7 +133,32 @@ def handle_download(args):
     asyncio.run(download_model_from_filecoin_async(args.hash))
 
 def handle_run(args):
-    if not manager.start(args.hash, args.port, args.host, args.context_length):
+    # Determine the hash to use
+    if args.hash and args.model_name:
+        logger.error("Please specify either a model name OR --hash, not both")
+        sys.exit(1)
+    elif args.hash:
+        model_hash = args.hash
+    elif args.model_name:
+        if args.model_name in PRESERVED_MODELS:
+            model_hash = PRESERVED_MODELS[args.model_name]
+            logger.info(f"Mapping model name '{args.model_name}' to hash: {model_hash}")
+        else:
+            logger.error(f"Model '{args.model_name}' not found in preserved models.")
+            logger.error("Available models:")
+            for model_name in PRESERVED_MODELS.keys():
+                logger.error(f"  - {model_name}")
+            logger.error("Please use 'eai model run --hash <your_hash>' for custom models.")
+            sys.exit(1)
+    else:
+        logger.error("Either model name or --hash must be provided")
+        logger.error("Usage: eai model run <model_name> OR eai model run --hash <hash>")
+        logger.error("Available models:")
+        for model_name in PRESERVED_MODELS.keys():
+            logger.error(f"  - {model_name}")
+        sys.exit(1)
+    
+    if not manager.start(model_hash, args.port, args.host, args.context_length):
         sys.exit(1)
 
 def handle_stop(args):
