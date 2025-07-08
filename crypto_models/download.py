@@ -17,9 +17,9 @@ GATEWAY_URLS = [
     # IPFS official gateway
     "https://ipfs.io/ipfs/",
     # Cloudflare IPFS gateway
-    "https://cloudflare-ipfs.com/ipfs/",
+    # "https://cloudflare-ipfs.com/ipfs/",
     # Cloudflare alternative
-    "https://cf-ipfs.com/ipfs/",
+    # "https://cf-ipfs.com/ipfs/",
     # Pinata-backed gateway
     "https://dweb.link/ipfs/",
     # 4everland Filecoin ecosystem gateway
