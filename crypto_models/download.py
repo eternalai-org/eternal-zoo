@@ -154,10 +154,10 @@ async def download_single_file_async(session: aiohttp.ClientSession, file_info: 
 
         try:
             # Use optimized chunk size for faster downloads
-            chunk_size = CHUNK_SIZE_MB * 1024 * 1024  # 4MB chunks
+            chunk_size = CHUNK_SIZE_MB * 1024 * 1024  # e.g. 4MB chunks
 
-            # Use a longer timeout for large files
-            timeout = aiohttp.ClientTimeout(total=900, connect=120, sock_read=300, sock_connect=120)
+            # Use shorter timeouts for faster retry on gateway failure
+            timeout = aiohttp.ClientTimeout(total=120, connect=20, sock_read=40, sock_connect=20)
 
             async with session.get(url, timeout=timeout) as response:
                 if response.status == 200:
@@ -172,7 +172,7 @@ async def download_single_file_async(session: aiohttp.ClientSession, file_info: 
                     with temp_path.open("wb") as f:
                         # Add timeout protection for each chunk
                         last_data_time = asyncio.get_event_loop().time()
-                        chunk_timeout = 180  # 180 seconds without data is a timeout
+                        chunk_timeout = 30  # 30 seconds without data is a timeout
                         bytes_written = 0
 
                         # Download with per-chunk timeout protection
@@ -189,7 +189,7 @@ async def download_single_file_async(session: aiohttp.ClientSession, file_info: 
                                 await progress_callback(len(chunk))
 
                             # Flush to disk less frequently for better performance
-                            if bytes_written >= FLUSH_INTERVAL_MB * 1024 * 1024:  # 50MB
+                            if bytes_written >= FLUSH_INTERVAL_MB * 1024 * 1024:  # e.g. 128MB
                                 f.flush()
                                 os.fsync(f.fileno())
                                 bytes_written = 0
