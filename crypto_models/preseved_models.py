@@ -10,5 +10,7 @@ PRESERVED_MODELS = {
     "gemma-3-4b": "bafkreiaevddz5ssjnbkmdrl6dzw5sugwirzi7wput7z2ttcwnvj2wiiw5q",
     "gemma-3-12b": "bafkreic2bkjuu3fvdoxnvusdt4in6fa6lubzhtjtmcp2zvokvfjpyndakq",
     "gemma-3-27b": "bafkreihi2cbsgja5dwa5nsuixicx2x3gbcnh7gsocxbmjxegtewoq2syve",
-    "gemma-3n-e4b": "bafkreihz3mz422vpoy7sccwj5tujkerxbjxdlmsqqf3ridxbe3m6ipnq5i"
+    "gemma-3n-e4b": "bafkreihz3mz422vpoy7sccwj5tujkerxbjxdlmsqqf3ridxbe3m6ipnq5i",
+    "flux-dev": "bafkreiaha3sjfmv4affmi5kbu6bnayenf2avwafp3cthhar3latmfi632u",
+    "flux-schnell": "bafkreibks5pmc777snbo7dwk26sympe2o24tpqfedjq6gmgghwwu7iio34"
 }

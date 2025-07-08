@@ -165,6 +165,20 @@ We've prepared several models for you to test with. Each model is listed with it
 |-------|------|-----|---------|
 | gemma-3n-e4b | 7.35 GB | 10.08 GB | `eai model run gemma-3n-e4b` |
 
+#### 🎨 Flux Series
+[Learn more about Flux](https://bfl.ai/models/flux-kontext)
+
+Generate high-quality images from text prompts using Flux models.
+
+| Model | Size | RAM | Command |
+|-------|------|-----|---------|
+| flux-dev | 32 GB | 20 GB | `eai model run flux-dev` |
+| flux-schnell | 32 GB | 20 GB | `eai model run flux-schnell` |
+
+**Example usage:**
+```bash
+eai model run flux-dev
+```
 
 ## 💻 Using the API
 
@@ -225,6 +239,19 @@ curl -X POST http://localhost:8080/v1/embeddings \
   -d '{
     "model": "local-model",
     "input": ["Hello, world!"]
+}'
+```
+
+### Image Generation Example (Flux models)
+
+```bash
+curl -X POST http://localhost:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local-model",
+    "prompt": "A serene landscape with mountains and a lake at sunset",
+    "n": 1,
+    "size": "1024x1024"
 }'
 ```
 

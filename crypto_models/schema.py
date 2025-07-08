@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, validator, root_validator
 from typing import List, Dict, Optional, Union, Any, ClassVar
 import time
 import uuid
+from enum import Enum
 # Import configuration settings
 from crypto_models.config import config
 
@@ -330,14 +331,65 @@ class ModelCard(BaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "user" # Consistent with potential OpenAI examples
+    owned_by: str = "user"
     root: Optional[str] = None
     parent: Optional[str] = None
     permission: List[ModelPermission] = Field(default_factory=lambda: [ModelPermission()])
-    family: Optional[str] = None
-    ram: Optional[float] = None # Aligned to use 'ram' consistent with service_info
+    ram: Optional[float] = None
     folder_name: Optional[str] = None
 
 class ModelList(BaseModel):
     object: str = "list"
     data: List[ModelCard] = [] 
+
+
+
+class ImageSize(str, Enum):
+    SMALL_SQUARE = "256x256"
+    MEDIUM_SQUARE = "512x512"
+    LARGE_SQUARE = "1024x1024"
+    HORIZONTAL = "1792x1024"
+    VERTICAL = "1024x1792"
+    COSMOS_SIZE = "1280x704"
+
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class Priority(str, Enum):
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+
+class ImageGenerationRequest(BaseModel):
+    """Request schema for OpenAI-compatible image generation API"""
+    prompt: str = Field(..., description="A text description of the desired image(s). The maximum length is 1000 characters.", max_length=1000)
+    model: Optional[str] = Field(default="cosmos-predict2-2b-text2image", description="The model to use for image generation")
+    size: Optional[ImageSize] = Field(default=ImageSize.COSMOS_SIZE, description="The size of the generated images")
+    negative_prompt: Optional[str] = Field(None, description="The negative prompt to generate the image from")
+    steps: Optional[int] = Field(default=50, ge=1, le=50, description="The number of inference steps (1-50)")
+    priority: Optional[Priority] = Field(default=Priority.NORMAL, description="Task priority in queue")
+    async_mode: Optional[bool] = Field(default=False, description="Whether to process asynchronously")
+
+class ImageData(BaseModel):
+    """Individual image data in the response"""
+    url: Optional[str] = Field(None, description="The URL of the generated image, if response_format is url")
+    b64_json: Optional[str] = Field(None, description="The base64-encoded JSON of the generated image, if response_format is b64_json")
+
+class ImageGenerationResponse(BaseModel):
+    """Response schema for OpenAI-compatible image generation API"""
+    created: int = Field(..., description="The Unix timestamp (in seconds) when the image was created")
+    data: List[ImageData] = Field(..., description="List of generated images")
+
+class ImageGenerationError(BaseModel):
+    """Error response schema"""
+    code: str = Field(..., description="Error code (e.g., 'contentFilter', 'generation_error', 'queue_full')")
+    message: str = Field(..., description="Human-readable error message")
+    type: Optional[str] = Field(None, description="Error type")
+
+class ImageGenerationErrorResponse(BaseModel):
+    """Error response wrapper"""
+    created: int = Field(..., description="The Unix timestamp (in seconds) when the error occurred")
+    error: ImageGenerationError = Field(..., description="Error details")
