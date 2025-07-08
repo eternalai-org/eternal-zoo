@@ -36,12 +36,28 @@ else:
     MAX_ATTEMPTS = len(GATEWAY_URLS)
 POSTFIX_MODEL_PATH = ".gguf"
 
-# Performance optimizations
-CHUNK_SIZE_MB = 4  # Increased from 1MB to 4MB
-FLUSH_INTERVAL_MB = 50  # Increased from 10MB to 50MB
+# Performance optimizations (dynamic based on system RAM and CPU)
+total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+cpu_cores = os.cpu_count() or 4
+
+# Set chunk size dynamically based on RAM
+if total_ram_gb >= 16:
+    CHUNK_SIZE_MB = 16
+elif total_ram_gb >= 8:
+    CHUNK_SIZE_MB = 8
+else:
+    CHUNK_SIZE_MB = 4
+
+# Set flush interval dynamically based on RAM
+if total_ram_gb >= 8:
+    FLUSH_INTERVAL_MB = 128
+else:
+    FLUSH_INTERVAL_MB = 50
+
+print(f"[CONFIG] CHUNK_SIZE_MB={CHUNK_SIZE_MB}, FLUSH_INTERVAL_MB={FLUSH_INTERVAL_MB}, RAM={total_ram_gb:.1f}GB, CPU={cpu_cores}")
+
 PROGRESS_BATCH_SIZE = 10 * 1024 * 1024  # Batch progress updates for 10MB chunks
 # Set MAX_CONCURRENT_DOWNLOADS dynamically based on CPU cores and available RAM (capped at 32)
-cpu_cores = os.cpu_count() or 4  # Fallback to 4 if detection fails
 cpu_limit = cpu_cores * 2
 ram_limit = 32  # Default if psutil is not available
 if psutil is not None:
