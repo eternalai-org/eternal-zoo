@@ -1,3 +1,6 @@
+{#- Copyright 2025-present the Unsloth team. All rights reserved. #}
+{#- Licensed under the Apache License, Version 2.0 (the "License") #}
+{#- Edits made by Unsloth to fix the chat template #}
 {% macro render_item_list(item_list, tag_name='required') %}
     {%- if item_list is defined and item_list is iterable and item_list | length > 0 %}
         {%- if tag_name %}{{- '\n<' ~ tag_name ~ '>' -}}{% endif %}
@@ -54,12 +57,14 @@
             {%- endif %}
             {{- render_item_list(param_fields.enum, 'enum') }}
             {%- set handled_keys = ['type', 'description', 'enum', 'required'] %}
-            {%- for json_key in param_fields.keys() | reject("in", handled_keys) %}
-                {%- set normed_json_key = json_key | replace("-", "_") | replace(" ", "_") | replace("$", "") %}
-                {%- if param_fields[json_key] is mapping %}
-                    {{- '\n<' ~ normed_json_key ~ '>' ~ (param_fields[json_key] | tojson | safe) ~ '</' ~ normed_json_key ~ '>' }}
-                {%- else %}
-                    {{-'\n<' ~ normed_json_key ~ '>' ~ (param_fields[json_key] | string) ~ '</' ~ normed_json_key ~ '>' }}
+            {%- for json_key in param_fields %}
+                {%- if json_key not in handled_keys %}
+                    {%- set normed_json_key = json_key | replace("-", "_") | replace(" ", "_") | replace("$", "") %}
+                    {%- if param_fields[json_key] is mapping %}
+                        {{- '\n<' ~ normed_json_key ~ '>' ~ (param_fields[json_key] | tojson | safe) ~ '</' ~ normed_json_key ~ '>' }}
+                    {%- else %}
+                        {{- '\n<' ~ normed_json_key ~ '>' ~ (param_fields[json_key] | string) ~ '</' ~ normed_json_key ~ '>' }}
+                    {%- endif %}
                 {%- endif %}
             {%- endfor %}
             {{- render_item_list(param_fields.required, 'required') }}
@@ -129,3 +134,5 @@
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
 {%- endif %}
+{#- Copyright 2025-present the Unsloth team. All rights reserved. #}
+{#- Licensed under the Apache License, Version 2.0 (the "License") #}
