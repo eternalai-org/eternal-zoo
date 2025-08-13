@@ -863,6 +863,8 @@ class EternalZooManager:
                 else:
                     raise ValueError(f"Best practices file not found: {best_practice_path}")
         elif backend == "mlx-lm":
+            if not shutil.which("mlx-openai-server"):
+                raise EternalZooServiceError("mlx-openai-server command not found in PATH")
             command = [
                 "mlx-openai-server",
                 "launch",
