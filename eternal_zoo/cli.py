@@ -279,14 +279,6 @@ def parse_args():
         help="🔍 Tensor backend for the model (default: gguf)",
         metavar="BACKEND"
     )
-    serve_command.add_argument(
-        "--task",
-        type=str,
-        default="chat",
-        choices=["chat", "embed", "image-generation", "image-edit"],
-        help="🎯 Model task type (default: chat)",
-        metavar="TYPE"
-    )
 
     # Model stop command
     stop_command = model_subparsers.add_parser(
@@ -1154,12 +1146,12 @@ def main():
 
     known_args, unknown_args = parse_args()
 
-    # Handle unknown arguments
+    # Allow unknown arguments to be passed through (for flexibility)
     if unknown_args:
-        for arg in unknown_args:
-            print_error(f'Unknown command or argument: {arg}')
-        print_info("Use --help for available commands and options")
-        sys.exit(2)
+        # Add unknown_args to the known_args namespace so handlers can access them if needed
+        known_args.unknown_args = unknown_args
+        # Log unknown arguments for debugging but don't exit
+        print_warning(f"Ignoring unknown arguments: {' '.join(unknown_args)}")
 
     # Handle commands
     if known_args.command == "model":
