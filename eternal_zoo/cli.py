@@ -1148,8 +1148,6 @@ def main():
 
     # Allow unknown arguments to be passed through (for flexibility)
     if unknown_args:
-        # Add unknown_args to the known_args namespace so handlers can access them if needed
-        known_args.unknown_args = unknown_args
         # Log unknown arguments for debugging but don't exit
         print_warning(f"Ignoring unknown arguments: {' '.join(unknown_args)}")
 
