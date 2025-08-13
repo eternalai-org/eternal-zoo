@@ -3,9 +3,7 @@ import json
 import random
 import aiohttp
 import asyncio
-import hashlib
 import subprocess
-from pathlib import Path
 from loguru import logger
 from huggingface_hub import HfApi
 from eternal_zoo.utils import async_move, async_rmtree, compute_file_hash
