@@ -15,7 +15,7 @@ download:
 	python eternal_zoo/download.py $(HASH)
 
 MLX_OPENAI_SERVER_TAG=1.2.18
-ETERNAL_ZOO_TAG=2.0.31
+ETERNAL_ZOO_TAG=2.0.32
 
 # Default target
 .PHONY: install
