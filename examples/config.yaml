@@ -3,24 +3,34 @@ host: 0.0.0.0
 models:
   # Main model - loaded immediately when server starts
   gpt-oss-20b:
-    model: gpt-oss-20b # Featured model name from eternal-zoo
+    hf_repo: lmstudio-community/gpt-oss-20b-MLX-8bit
+    task: chat
+    backend: mlx-lm
     on_demand: True  # Main model - loaded immediately
 
   # On-demand models - loaded only when requested
   qwen3-30b-instruct:
     model: qwen3-30b-a3b-instruct-2507 # Featured model name from eternal-zoo
+    task: chat
+    backend: gguf
     on_demand: True  # Main model - loaded immediately
 
   qwen3-30b-thinking:
     model: qwen3-30b-a3b-thinking-2507 # Featured model name from eternal-zoo
+    task: chat
+    backend: gguf
     on_demand: True  # Main model - loaded immediately
 
   qwen3-30b-coder:
     model: qwen3-coder-30b-a3b-instruct
+    task: chat
+    backend: gguf
     on_demand: True
 
   flux-dev-nsfw:
     model: flux-dev-nsfw # Featured model name from eternal-zoo
+    task: chat
+    backend: gguf
     on_demand: True   # On-demand model - loaded only when requested
   
   # Hugging Face model
@@ -29,6 +39,7 @@ models:
     model: medgemma-27b-it-Q8_0.gguf
     mmproj: mmproj-F16.gguf
     task: chat
+    backend: gguf
     on_demand: True   # On-demand model - loaded when requested
   
   # Embedding model
@@ -36,4 +47,5 @@ models:
     hf_repo: jinaai/jina-embeddings-v4-text-code-GGUF
     model: jina-embeddings-v4-text-code-F16.gguf
     task: embed
+    backend: gguf
     on_demand: True   # On-demand model - loaded when requested
