@@ -441,13 +441,13 @@ if command_exists llama-cli; then
     if [ "$INSTALLED_VERSION" -ne "$LATEST_VERSION" ]; then
         log_message "Version mismatch detected. Reinstalling llama.cpp to match formula version..."
         brew uninstall --force llama.cpp
-        brew install llama.cpp.rb || handle_error $? "Failed to install llama.cpp"
+        brew install llama.cpp || handle_error $? "Failed to install llama.cpp"
     else
         log_message "Already running the correct version of llama.cpp."
     fi
 else
     log_message "llama.cpp not found. Installing..."
-    brew install llama.cpp.rb || handle_error $? "Failed to install llama.cpp"
+    brew install llama.cpp || handle_error $? "Failed to install llama.cpp"
 fi
 
 # Step 6: Create and activate virtual environment
