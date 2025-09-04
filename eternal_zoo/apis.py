@@ -424,9 +424,9 @@ class ServiceHandler:
                                         
                             except Exception as e:
                                 logger.error(f"Failed to parse streaming chunk in {stream_id}: {e}")
-                                # Pass through unparseable data (except ping messages)
-                                if not line.strip().startswith(': ping'):
-                                    yield f"data: {line}\n\n"
+                                # # Pass through unparseable data (except ping messages)
+                                # if not line.strip().startswith(': ping'):
+                                #     yield line
                                 
                     # Process any remaining buffer content
                     if buffer.strip():
