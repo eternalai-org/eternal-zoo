@@ -839,7 +839,7 @@ class EternalZooManager:
                 "--pooling", "mean",
                 "--no-webui",
                 "--no-context-shift",
-                "-fa",
+                "-fa", "on",
                 "-ngl", "9999",
                 "-c", str(context_length),
                 "--embeddings",
@@ -888,6 +888,7 @@ class EternalZooManager:
             self.llama_server_path,
             "--model", str(model_path),
             "--embedding",
+            "-fa", "on",
             "--pooling", "mean",
             "-ub", "4096",
             "-ngl", "9999"

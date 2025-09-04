@@ -177,9 +177,15 @@ FEATURED_MODELS = {
         "task": "chat",
         "backend": "mlx-lm"
     },
+    "hermes-4-14b": {
+        "repo": "bartowski/NousResearch_Hermes-4-14B-GGUF",
+        "model": "NousResearch_Hermes-4-14B-Q4_K_M.gguf",
+        "task": "chat",
+        "backend": "gguf"
+    },
     "hermes-4-70b": {
         "repo": "bartowski/NousResearch_Hermes-4-70B-GGUF",
-        "model": "NousResearch_Hermes-4-70B-Q4_K_M.gguf",
+        "model": "NousResearch_Hermes-4-14B-Q8_0.gguf",
         "task": "chat",
         "backend": "gguf"
     },
