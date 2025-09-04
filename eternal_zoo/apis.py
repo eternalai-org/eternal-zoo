@@ -406,8 +406,6 @@ class ServiceHandler:
                             
                             try:
                                 chunk_obj = ChatCompletionChunk.model_validate_json(json_str)
-                                if len(chunk_obj.choices) == 0:
-                                    continue
                                 choice = chunk_obj.choices[0]
 
                                 # Handle finish reason - output accumulated tool calls
@@ -426,9 +424,9 @@ class ServiceHandler:
                                         
                             except Exception as e:
                                 logger.error(f"Failed to parse streaming chunk in {stream_id}: {e}")
-                                # Pass through unparseable data (except ping messages)
-                                if not line.strip().startswith(': ping'):
-                                    yield line
+                                # # Pass through unparseable data (except ping messages)
+                                # if not line.strip().startswith(': ping'):
+                                #     yield line
                                 
                     # Process any remaining buffer content
                     if buffer.strip():
