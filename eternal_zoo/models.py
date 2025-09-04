@@ -19,6 +19,7 @@ HASH_TO_MODEL = {
     "bafkreibokz6tdke7k3eozsro3hh3luyqbub7tzdawpswtt7q6bzfg36fw4": "dolphin-3.0-llama3.1-8b",
     "bafkreiclhnqcjfbbusqmg73jcwasomv7tqchkqm3fea5wwzs5vavc2wzfq": "gpt-oss-20b",
     "bafkreia4xtrb4vfsf7lblomjwh7cc3nlpci3fsqyeqpgqqflx4cnhwa3za": "gpt-oss-120b",
+    "bafkreicyuuvaeavozddtpc3tajfejaxuvuw2cpfajtt6lsddo22gcqg2km": "hermes-4-70b",
     "bafkreiaha3sjfmv4affmi5kbu6bnayenf2avwafp3cthhar3latmfi632u": "flux-dev",
     "bafkreibks5pmc777snbo7dwk26sympe2o24tpqfedjq6gmgghwwu7iio34": "flux-schnell",
     "bafkreidbaksrogxispjejczfj36vtf5uzsbjt7irspl6kckynz5u2ugzke": "flux-dev-nsfw",
@@ -175,6 +176,24 @@ FEATURED_MODELS = {
         "hf-repo": "lmstudio-community/gpt-oss-20b-GGUF",
         "task": "chat",
         "backend": "mlx-lm"
+    },
+    "hermes-4-14b": {
+        "repo": "bartowski/NousResearch_Hermes-4-14B-GGUF",
+        "model": "NousResearch_Hermes-4-14B-Q4_K_M.gguf",
+        "task": "chat",
+        "backend": "gguf"
+    },
+    "hermes-4-70b": {
+        "repo": "bartowski/NousResearch_Hermes-4-70B-GGUF",
+        "model": "NousResearch_Hermes-4-14B-Q8_0.gguf",
+        "task": "chat",
+        "backend": "gguf"
+    },
+    "hermes-4-405b": {
+        "repo": "lmstudio-community/Hermes-4-405B-GGUF",
+        "pattern": "Q4_K_M",
+        "task": "chat",
+        "backend": "gguf"
     },
     "flux-dev": {
        "repo": "NikolaSigmoid/FLUX.1-dev",
