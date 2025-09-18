@@ -177,6 +177,16 @@ FEATURED_MODELS = {
         "task": "chat",
         "backend": "mlx-lm"
     },
+    "qwen3-next-80b-a3b-instruct": {
+        "hf-repo": "lmstudio-community/Qwen3-Next-80B-A3B-Instruct-MLX-8bit",
+        "task": "chat",
+        "backend": "mlx-lm"
+    },
+    "qwen3-next-80b-a3b-thinking": {
+        "hf-repo": "lmstudio-community/Qwen3-Next-80B-A3B-Thinking-MLX-8bit",
+        "task": "chat",
+        "backend": "mlx-lm"
+    },
     "hermes-4-14b": {
         "repo": "bartowski/NousResearch_Hermes-4-14B-GGUF",
         "model": "NousResearch_Hermes-4-14B-Q4_K_M.gguf",
