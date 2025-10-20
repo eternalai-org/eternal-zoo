@@ -386,6 +386,12 @@ class ServiceHandler:
                         error_text = await response.aread()
                         error_msg = f"data: {{\"error\":{{\"message\":\"{error_text.decode()}\",\"code\":{response.status_code}}}}}\n\n"
                         logger.error(f"Streaming error for {stream_id}: {response.status_code} - {error_text.decode()}")
+                        try:
+                            safe_payload = json.dumps(data)[:2000]
+                        except Exception:
+                            safe_payload = str(data)[:2000]
+                        # Explicit stdout print for debug visibility
+                        print(f"[STREAM 400] id={stream_id} status={response.status_code} payload={safe_payload} error={error_text.decode()[:500]}")
                         yield error_msg
                         return
                     
@@ -737,9 +743,32 @@ class RequestProcessor:
                                 
                                 success = await RequestProcessor._ensure_model_active_in_queue(request_obj.model, request_id)
                                 if not success:
-                                    error_msg = f"Model {request_obj.model} is not available or failed to switch or is not a {tasks} model"
-                                    logger.error(f"[{request_id}] {error_msg}")
-                                    future.set_exception(HTTPException(status_code=400, detail=error_msg))
+                                    switch_error = getattr(eternal_zoo_manager, 'last_switch_error', None)
+                                    if switch_error:
+                                        error_msg = f"{switch_error}"
+                                    else:
+                                        error_msg = f"Model {request_obj.model} is not available or failed to switch or is not a {tasks} model"
+                                    try:
+                                        safe_payload = json.dumps(request_data)[:2000]
+                                    except Exception:
+                                        safe_payload = str(request_data)[:2000]
+                                    logger.error(f"[{request_id}] 400 due to model switch: {error_msg}. Payload: {safe_payload}")
+                                    
+                                    # Respond clearly to client
+                                    error_body = {
+                                        "error": {
+                                            "message": error_msg,
+                                            "type": "insufficient_resources",
+                                            "code": "MODEL_OOM"
+                                        }
+                                    }
+                                    if is_streaming:
+                                        async def error_stream():
+                                            yield f"data: {json.dumps(error_body)}\n\n"
+                                            yield "data: [DONE]\n\n"
+                                        future.set_result(StreamingResponse(error_stream(), media_type="text/event-stream"))
+                                    else:
+                                        future.set_exception(HTTPException(status_code=400, detail=error_body))
                                     continue
                                 
                                 # Refresh service info after potential model switch
@@ -755,7 +784,12 @@ class RequestProcessor:
                             logger.info(f"[{request_id}] Completed request for endpoint {endpoint} "
                                        f"(processing: {processing_time:.2f}s, total: {total_time:.2f}s)")
                         except Exception as e:
-                            logger.error(f"[{request_id}] Handler error for {endpoint}: {str(e)}")
+                            try:
+                                safe_payload = json.dumps(request_data)[:2000]
+                            except Exception:
+                                safe_payload = str(request_data)[:2000]
+                            logger.error(f"[{request_id}] Handler error for {endpoint}: {str(e)} | Payload: {safe_payload}")
+                            print(f"[API ERROR] req={request_id} endpoint={endpoint} payload={safe_payload} error={str(e)[:500]}")
                             future.set_exception(e)
                     else:
                         logger.error(f"[{request_id}] Endpoint not found: {endpoint}")

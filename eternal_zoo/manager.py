@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import shutil
@@ -49,6 +50,11 @@ class EternalZooManager:
         self.logs_dir.mkdir(exist_ok=True)
         self.ai_log_file = self.logs_dir / "ai.log"
         self.api_log_file = self.logs_dir / "api.log"
+        
+        # Last model switch error for surfacing to API layer
+        self.last_switch_error: Optional[str] = None
+        # Optional context length override supplied by request layer
+        self.switch_ctx_override: Optional[int] = None
         
     def _get_free_port(self) -> int:
         """Get a free port number."""
@@ -690,6 +696,175 @@ class EternalZooManager:
             return None
         return best_practice_path
     
+    def _estimate_model_ram_gb(self, ai_service: Dict[str, Any], context_length_override: Optional[int] = None) -> float:
+        """Estimate RAM needed to load a model.
+        Priority:
+        1) Use explicit 'estimated_ram_gb' if provided in service config
+        2) For GGUF models, base on model file size with overhead multiplier
+        3) Fallback default
+        """
+        try:
+            if "estimated_ram_gb" in ai_service and ai_service["estimated_ram_gb"] is not None:
+                return float(ai_service["estimated_ram_gb"])  # trusted override
+        except (TypeError, ValueError):
+            pass
+
+        backend = ai_service.get("backend", "gguf")
+        model_path = ai_service.get("model")
+        if backend == "gguf" and model_path and os.path.exists(model_path):
+            # Prefer a gguf-based estimate including KV cache if library is available
+            configured_context = ai_service.get("context_length", 32768)
+            context_length = int(context_length_override) if context_length_override is not None else int(configured_context)
+            try:
+                file_size_gb_dbg = os.path.getsize(model_path) / (1024 ** 3)
+            except Exception:
+                file_size_gb_dbg = None
+            file_size_str = f"{file_size_gb_dbg:.2f}GB" if file_size_gb_dbg is not None else "unknown"
+            logger.info(
+                f"RAM estimate inputs: backend={backend}, model='{model_path}', "
+                f"configured_ctx={configured_context}, override_ctx={context_length_override}, used_ctx={context_length}, "
+                f"file_size={file_size_str}"
+            )
+            estimate_gb = None
+            try:
+                import gguf  # type: ignore
+                try:
+                    # Newer gguf API may accept a path directly
+                    reader = gguf.GGUFReader(model_path)
+                except Exception:
+                    # Fallback: open file handle
+                    with open(model_path, "rb") as f:
+                        reader = gguf.GGUFReader(f)  # type: ignore
+
+                # Try multiple common metadata keys for layer and embedding size
+                meta_get = getattr(reader, "get_value", None)
+                n_layer = None
+                n_embd = None
+                if callable(meta_get):
+                    for key in [
+                        "llama.block_count",
+                        "llama.layers",
+                        "general.block_count",
+                        "general.layers",
+                    ]:
+                        try:
+                            val = meta_get(key)
+                            if isinstance(val, (int, float)):
+                                n_layer = int(val)
+                                break
+                        except Exception:
+                            pass
+                    for key in [
+                        "llama.embedding_length",
+                        "llama.hidden_size",
+                        "general.embedding_length",
+                        "general.hidden_size",
+                    ]:
+                        try:
+                            val = meta_get(key)
+                            if isinstance(val, (int, float)):
+                                n_embd = int(val)
+                                break
+                        except Exception:
+                            pass
+
+                # If metadata unavailable, try to use configuration values before falling back
+                if not n_layer or not n_embd:
+                    n_layer_cfg = None
+                    n_embd_cfg = None
+                    try:
+                        for key in [
+                            "n_layer", "num_layers", "layers", "llama.block_count", "general.block_count"
+                        ]:
+                            if key in ai_service and ai_service.get(key) is not None:
+                                n_layer_cfg = int(ai_service.get(key))
+                                break
+                    except Exception:
+                        n_layer_cfg = None
+
+                    try:
+                        for key in [
+                            "n_embd", "hidden_size", "embedding_length", "general.embedding_length"
+                        ]:
+                            if key in ai_service and ai_service.get(key) is not None:
+                                n_embd_cfg = int(ai_service.get(key))
+                                break
+                    except Exception:
+                        n_embd_cfg = None
+
+                    if n_layer_cfg and n_embd_cfg:
+                        n_layer = n_layer_cfg
+                        n_embd = n_embd_cfg
+                        logger.info(f"Using config-supplied metadata: n_layer={n_layer}, n_embd={n_embd}")
+                        try:
+                            print(f"[RAM EST META CONFIG] n_layer={n_layer} n_embd={n_embd}")
+                        except Exception:
+                            pass
+                    else:
+                        raise RuntimeError("gguf metadata missing for n_layer or n_embd")
+
+                # Assume f16 KV cache unless overridden by runtime flags or config
+                bytes_per_element = 2
+                try:
+                    kv_bpe_cfg = ai_service.get("kv_bytes_per_element", None)
+                    if kv_bpe_cfg is not None:
+                        bytes_per_element = int(kv_bpe_cfg)
+                    else:
+                        kv_dtype = ai_service.get("kv_dtype", None)
+                        if isinstance(kv_dtype, str):
+                            kv_dtype_l = kv_dtype.lower()
+                            if kv_dtype_l in ("f16", "bf16"):
+                                bytes_per_element = 2
+                            elif kv_dtype_l in ("f32", "float32"):
+                                bytes_per_element = 4
+                            elif kv_dtype_l in ("q8", "q8_kv", "int8"):
+                                bytes_per_element = 1
+                except Exception:
+                    # Ignore malformed overrides and keep default
+                    pass
+                logger.info(f"GGUF metadata: n_layer={n_layer}, n_embd={n_embd}, bytes_per_element={bytes_per_element}")
+                try:
+                    print(f"[RAM EST META] n_layer={n_layer} n_embd={n_embd} bytes_per_element={bytes_per_element}")
+                except Exception:
+                    pass
+                kv_cache_bytes = 2 * n_layer * int(context_length) * n_embd * bytes_per_element
+                kv_cache_gb = kv_cache_bytes / (1024 ** 3)
+
+                # Weight residency: mostly mmapped, but budget a small residency buffer
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                weight_residency_buffer_gb = min(2.0, file_size_gb * 0.05)
+                logger.info(
+                    f"GGUF calc parts: file_size={file_size_gb:.2f}GB, kv_cache={kv_cache_gb:.2f}GB, weight_buffer={weight_residency_buffer_gb:.2f}GB"
+                )
+                try:
+                    print(f"[RAM EST PARTS] file_size={file_size_gb:.2f}GB kv_cache={kv_cache_gb:.2f}GB weight_buffer={weight_residency_buffer_gb:.2f}GB")
+                except Exception:
+                    pass
+
+                estimate_gb = kv_cache_gb + weight_residency_buffer_gb + 2.0  # extra headroom
+                logger.info(
+                    f"GGUF estimate using metadata: layers={n_layer}, emb={n_embd}, ctx={context_length}, "
+                    f"kv~{kv_cache_gb:.2f}GB, buffer~{weight_residency_buffer_gb:.2f}GB => total~{estimate_gb:.2f}GB"
+                )
+            except Exception as e:
+                # Fallback to file-size heuristic when gguf parsing not available
+                try:
+                    file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                    estimate_gb = file_size_gb * 1.25 + 4.0
+                    logger.warning(
+                        f"GGUF-based estimation failed ({type(e).__name__}: {str(e)}); "
+                        f"using file-size heuristic size={file_size_gb:.2f}GB -> estimate={estimate_gb:.2f}GB"
+                    )
+                except Exception:
+                    pass
+
+            if estimate_gb is None:
+                estimate_gb = 12.0
+            return max(estimate_gb, 8.0)
+
+        # Default conservative fallback
+        return 12.0
+
     def _get_model_family(self, model_name: str | None = None) -> str:
         if model_name is None:
             return None
@@ -935,7 +1110,7 @@ class EternalZooManager:
         return command
 
 
-    async def switch_model(self, target_model_id: str) -> bool:
+    async def switch_model(self, target_model_id: str, context_length_override: Optional[int] = None) -> bool:
         """
         Switch to a different model that was registered during multi-model start.
         This will offload the currently active model and load the requested model.
@@ -964,12 +1139,25 @@ class EternalZooManager:
                 target_ai_service = ai_service
         
         if target_ai_service is None:
-            logger.error(f"Target model {target_model_id} not found")
+            self.last_switch_error = f"Target model {target_model_id} not found"
+            logger.error(self.last_switch_error)
             return False
         
         active_pid = active_ai_service.get("pid", None)
         if active_pid and psutil.pid_exists(active_pid):
-            self._terminate_process_safely(active_pid, "EternalZoo AI Service", force=True)
+            # Terminate current model process first
+            await self._terminate_process_safely_async(active_pid, "EternalZoo AI Service", timeout=self.PROCESS_TERM_TIMEOUT)
+            # Wait for memory to stabilize up to a short window
+            logger.info("Waiting up to 3s for memory to stabilize after termination...")
+            start_ts = time.time()
+            last_avail = psutil.virtual_memory().available
+            while time.time() - start_ts < 3.0:
+                await asyncio.sleep(0.25)
+                cur_avail = psutil.virtual_memory().available
+                # Break early if available memory rises by >256MB indicating reclaim
+                if cur_avail - last_avail > 256 * 1024 * 1024:
+                    break
+                last_avail = cur_avail
         else:
             logger.warning(f"Active model {active_ai_service.get('model_id', 'unknown')} not found")
 
@@ -982,17 +1170,57 @@ class EternalZooManager:
     
         running_ai_command = target_ai_service["running_ai_command"]
         if running_ai_command is None:
-            logger.error(f"Target model {target_model_id} has no running AI command")
+            self.last_switch_error = f"Target model {target_model_id} has no running AI command"
+            logger.error(self.last_switch_error)
             return False
 
+        # Pre-loading memory checks (RAM and optional VRAM)
+        # Improved memory estimation
+        effective_ctx_override = context_length_override if context_length_override is not None else self.switch_ctx_override
+        model_memory_gb = self._estimate_model_ram_gb(target_ai_service, context_length_override=effective_ctx_override)
+
+        available_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        configured_context = target_ai_service.get("context_length", 32768)
+        eff_ctx = effective_ctx_override if effective_ctx_override is not None else configured_context
+        logger.info(
+            f"Memory check for {target_model_id}: required={model_memory_gb:.2f}GB, available RAM={available_ram_gb:.2f}GB, "
+            f"ctx_used={eff_ctx}, ctx_configured={configured_context}, ctx_override={effective_ctx_override}"
+        )
+
+        if available_ram_gb < model_memory_gb:
+            self.last_switch_error = (
+                f"Insufficient RAM for {target_model_id} - required {model_memory_gb:.2f}GB, "
+                f"available {available_ram_gb:.2f}GB"
+            )
+            logger.error(self.last_switch_error)
+            return False
+
+        # Optional: Linux/NVIDIA VRAM check using pynvml if available
+        if sys.platform.startswith("linux"):
+            try:
+                import pynvml  # type: ignore
+                pynvml.nvmlInit()
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                available_vram_gb = info.free / (1024 ** 3)
+                logger.info(f"VRAM check: available VRAM={available_vram_gb:.2f}GB")
+                if available_vram_gb < model_memory_gb:
+                    self.last_switch_error = (
+                        f"Insufficient VRAM for {target_model_id} - required {model_memory_gb:.2f}GB, "
+                        f"available VRAM {available_vram_gb:.2f}GB"
+                    )
+                    logger.error(self.last_switch_error)
+                    return False
+            except Exception as e:
+                logger.warning(f"VRAM check skipped/unavailable: {e}")
+
         local_model_port = self._get_free_port()
-        # extend the running_ai_command with the port and host
-        running_ai_command.extend(["--port", str(local_model_port), "--host", host])
-        logger.info(f"Switching to model: {target_model_id} with command: {' '.join(running_ai_command)}")
+        # avoid mutating stored command in service info
+        launch_command = [*running_ai_command, "--port", str(local_model_port), "--host", host]
+        logger.info(f"Switching to model: {target_model_id} with command: {' '.join(launch_command)}")
         with open(self.ai_log_file, 'w') as stderr_log:
-            # ex
-            ai_process = subprocess.Popen(
-                running_ai_command,
+            ai_process = await asyncio.create_subprocess_exec(
+                *launch_command,
                 stderr=stderr_log,
                 preexec_fn=os.setsid
             )
@@ -1005,11 +1233,19 @@ class EternalZooManager:
         with open(self.ai_service_file, 'wb') as f:
             msgpack.pack(ai_services, f)
             
-        # wait for the service to be healthy
-        if not wait_for_health(local_model_port):
-            self._terminate_process_safely(ai_process.pid, "EternalZoo AI Service", force=True)
-            logger.error(f"Failed to switch to model {target_model_id}")
+        # wait for the service to be healthy (run sync check in a thread)
+        # After spawn, observe memory stabilization until health or short window
+        # Log RAM before health wait
+        pre_health_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        logger.info(f"Available RAM before health wait: {pre_health_ram_gb:.2f}GB")
+        is_healthy = await asyncio.to_thread(wait_for_health, local_model_port)
+        if not is_healthy:
+            await self._terminate_process_safely_async(ai_process.pid, "EternalZoo AI Service", timeout=self.PROCESS_TERM_TIMEOUT)
+            self.last_switch_error = f"Health check failed for {target_model_id} on port {local_model_port}"
+            logger.error(self.last_switch_error)
             return False
+        post_health_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        logger.info(f"Available RAM after health success: {post_health_ram_gb:.2f}GB")
         
         with open(self.ai_service_file, 'wb') as f:
             msgpack.pack(ai_services, f)
@@ -1018,6 +1254,11 @@ class EternalZooManager:
         self.update_service_info({
             "ai_services": ai_services, 
         })
+
+        # Clear last switch error on success
+        self.last_switch_error = None
+        # Clear transient context override
+        self.switch_ctx_override = None
 
         return True
     

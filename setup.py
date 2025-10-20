@@ -35,8 +35,11 @@ setup(
         "pydantic==2.11.7",
         "asyncio==3.4.3",
         "json_repair==0.47.6",
-        "msgpack==1.1.1"
+        "msgpack==1.1.1",
+        "gguf>=0.9.2",
+        "pynvml>=11.0.0; platform_system=='Linux'"
     ],
+    extras_require={},
     entry_points={
         "console_scripts": [
             "eai = eternal_zoo.cli:main",
