@@ -303,10 +303,13 @@ else
     CONTAINER="$(autotag llama_cpp)"
 fi
 
+JETSON_SH_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")"
+log_message "Using project directory based on jetson.sh location: $JETSON_SH_DIR"
+
 echo '#!/bin/bash' > "$LLAMA_WRAPPER_DIR/llama-server"
 echo '# Wrapper script to run llama-server using jetson-containers docker image.' >> "$LLAMA_WRAPPER_DIR/llama-server"
 echo '' >> "$LLAMA_WRAPPER_DIR/llama-server"
-echo "PROJECT_DIR=$(pwd)" >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo "PROJECT_DIR=\"$JETSON_SH_DIR\"" >> "$LLAMA_WRAPPER_DIR/llama-server"
 echo "MODELS_DIR=\"$HOME/.eternal-zoo/models\"" >> "$LLAMA_WRAPPER_DIR/llama-server"
 echo "CONTAINER=\"$CONTAINER\"" >> "$LLAMA_WRAPPER_DIR/llama-server"
 echo '' >> "$LLAMA_WRAPPER_DIR/llama-server"
