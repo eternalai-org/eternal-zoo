@@ -58,6 +58,26 @@ check_sudo() {
     log_message "Sudo privileges confirmed."
 }
 
+# Function: check_internet_connectivity
+# Verifies outbound connectivity by trying GitHub (curl) or ICMP ping as fallback.
+check_internet_connectivity() {
+    log_message "Checking internet connectivity..."
+    if command_exists curl; then
+        if ! curl -sSf https://github.com >/dev/null 2>&1; then
+            handle_error 1 "No internet connectivity or GitHub unreachable."
+        fi
+    else
+        if command_exists ping; then
+            if ! ping -c1 -W2 8.8.8.8 >/dev/null 2>&1; then
+                handle_error 1 "No internet connectivity (ping to 8.8.8.8 failed)."
+            fi
+        else
+            handle_error 1 "Neither curl nor ping are available to verify connectivity."
+        fi
+    fi
+    log_message "Internet connectivity verified."
+}
+
 # Function: check_jetson_device
 # Checks if the script is running on a Jetson device.
 check_jetson_device() {
@@ -75,22 +95,26 @@ check_jetson_device() {
 }
 
 # Function: check_python_installable
-# Checks if a suitable Python 3 is present (uses system python3, installs if missing).
+# Checks if Python 3.12 is present, and if not, installs it.
 check_python_installable() {
-    log_message "Checking for system python3..."
-    if command_exists python3; then
-        PYTHON_CMD="python3"
+    log_message "Checking for python3.12..."
+    if command_exists python3.12; then
+        PYTHON_CMD="python3.12"
         PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
-        log_message "Using system python3: $PYTHON_CMD ($PYTHON_VERSION)"
+        log_message "Using python3.12: $PYTHON_CMD ($PYTHON_VERSION)"
     else
-        log_message "python3 not found. Attempting to install python3..."
-        sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip || handle_error $? "Failed to install python3."
-        if command_exists python3; then
-            PYTHON_CMD="python3"
+        log_message "python3.12 not found. Attempting to install it..."
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common || handle_error $? "Failed to install software-properties-common."
+        sudo add-apt-repository -y ppa:deadsnakes/ppa || handle_error $? "Failed to add deadsnakes PPA."
+        sudo apt-get update
+        sudo apt-get install -y python3.12 python3.12-venv python3.12-pip || handle_error $? "Failed to install python3.12."
+        if command_exists python3.12; then
+            PYTHON_CMD="python3.12"
             PYTHON_VERSION=$($PYTHON_CMD --version 2>&1)
-            log_message "Successfully installed python3: $PYTHON_CMD ($PYTHON_VERSION)"
+            log_message "Successfully installed python3.12: $PYTHON_CMD ($PYTHON_VERSION)"
         else
-            handle_error 1 "python3 installation failed. Please install python3 manually."
+            handle_error 1 "python3.12 installation failed. Please install it manually."
         fi
     fi
 }
@@ -102,6 +126,7 @@ preflight_checks() {
     check_jetson_device
     check_apt_get
     check_sudo
+    check_internet_connectivity
     check_python_installable
     log_message "All preflight checks passed."
     echo
@@ -139,11 +164,17 @@ fi
 log_message "All required packages installed successfully."
 
 # Step 2: Check NVIDIA Container Toolkit (usually preinstalled on Jetson images)
-if ! command_exists nvidia-container-toolkit; then
+if ! command_exists nvidia-container-toolkit && ! command_exists nvidia-ctk; then
     log_message "NVIDIA Container Toolkit not found. Installing..."
-    distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+    # Parse ID and VERSION_ID from /etc/os-release to construct the correct repo URL
+    . /etc/os-release
+    UBUNTU_VERSION_SHORT="${VERSION_ID}"
+    # Fallback if VERSION_ID not present
+    if [ -z "$UBUNTU_VERSION_SHORT" ]; then
+        UBUNTU_VERSION_SHORT=$(lsb_release -rs 2>/dev/null || true)
+    fi
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/ubuntu$(lsb_release -rs)/arm64/nvidia-container-toolkit.list | \
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/ubuntu${UBUNTU_VERSION_SHORT}/arm64/nvidia-container-toolkit.list | \
       sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
       sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
     sudo apt-get update
@@ -261,46 +292,35 @@ else
     log_message "Skipping custom build of llama_cpp; native image supports --mmproj."
 fi
 
-# Step 5: Create wrapper script for llama-server
+# Step 5: Create llama-server wrapper
 log_message "Creating llama-server wrapper script..."
 LLAMA_WRAPPER_DIR="$HOME/.local/bin"
 mkdir -p "$LLAMA_WRAPPER_DIR"
 
-# Prepare variables for template and model paths.
-PYTHON_VERSION=$($PYTHON_CMD -c "import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')")
-MODELS_DIR="$(pwd)/llms-storage"
-TEMPLATES_DIR="$(pwd)/eternalzoo/examples/templates"
-USER_HOME="$HOME"
-ABS_TEMPLATE_PATH="$(pwd)/eternalzoo/lib/$PYTHON_VERSION/site-packages/eternal_zoo/examples/templates"
-
-# Determine which container to use in the wrapper
-if [ "${NEED_CUSTOM_LLAMA_BUILD:-0}" = "1" ]; then
-    CONTAINER="my-llama-build-mmsupport"
+if [ "$NEED_CUSTOM_LLAMA_BUILD" = "1" ]; then
+    CONTAINER="$(autotag my-llama-build-mmsupport)"
 else
     CONTAINER="$(autotag llama_cpp)"
 fi
 
-cat > "$LLAMA_WRAPPER_DIR/llama-server" << EOF
-#!/bin/bash
-# Wrapper script to run llama-server using jetson-containers docker image.
+echo '#!/bin/bash' > "$LLAMA_WRAPPER_DIR/llama-server"
+echo '# Wrapper script to run llama-server using jetson-containers docker image.' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo '' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo "PROJECT_DIR=$(pwd)" >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo "MODELS_DIR=\"$HOME/.eternal-zoo/models\"" >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo "CONTAINER=\"$CONTAINER\"" >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo '' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo '# Mount model and template directories for Docker.' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo 'PROJECT_MOUNT="-v $PROJECT_DIR:$PROJECT_DIR"' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo 'MODEL_MOUNT="-v $MODELS_DIR:$MODELS_DIR"' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo '' >> "$LLAMA_WRAPPER_DIR/llama-server"
+echo 'docker run --runtime nvidia -it --rm --network=host $PROJECT_MOUNT $MODEL_MOUNT $CONTAINER llama-server "$@"' >> "$LLAMA_WRAPPER_DIR/llama-server"
 
-MODELS_DIR="$MODELS_DIR"
-TEMPLATES_DIR="$TEMPLATES_DIR"
-ABS_TEMPLATE_PATH="$ABS_TEMPLATE_PATH"
-CONTAINER="$CONTAINER"
-
-# Mount model and template directories for Docker.
-MODEL_MOUNT="-v \$MODELS_DIR:\$MODELS_DIR"
-TEMPLATE_MOUNT="-v \$TEMPLATES_DIR:\$TEMPLATES_DIR"
-ABS_TEMPLATE_PATH="-v \$ABS_TEMPLATE_PATH:\$ABS_TEMPLATE_PATH"
-
-docker run --runtime nvidia -it --rm --network=host \$MODEL_MOUNT \$TEMPLATE_MOUNT \$ABS_TEMPLATE_PATH \$CONTAINER llama-server "\$@"
-EOF
 chmod +x "$LLAMA_WRAPPER_DIR/llama-server"
 log_message "llama-server wrapper created at $LLAMA_WRAPPER_DIR/llama-server"
 
 # -----------------------------------------------------------------------------
-# Step 6: Add llama-server wrapper directory to PATH in shell rc file
+# Step 5: Add llama-server wrapper directory to PATH in shell rc file
 # -----------------------------------------------------------------------------
 # Function: update_shell_rc_path
 # Updates the specified shell rc file to include the wrapper directory in PATH.
@@ -326,6 +346,7 @@ update_shell_rc_path() {
 
 if [[ ":$PATH:" != *":$LLAMA_WRAPPER_DIR:"* ]]; then
     log_message "Adding $LLAMA_WRAPPER_DIR to PATH..."
+    export PATH="$LLAMA_WRAPPER_DIR:$PATH"
     # Detect which shell rc file to update based on the user's shell.
     SHELL_NAME=$(basename "$SHELL")
     if [ "$SHELL_NAME" = "zsh" ]; then
@@ -338,76 +359,18 @@ if [[ ":$PATH:" != *":$LLAMA_WRAPPER_DIR:"* ]]; then
     log_message "PATH updated for current session and future sessions."
 fi
 
-# Step 6: Python venv and eternalzoo setup
-log_message "Creating virtual environment 'eternalzoo'..."
-"$PYTHON_CMD" -m venv eternalzoo || handle_error $? "Failed to create virtual environment."
+# Step 6: Create and activate virtual environment
+VENV_PATH=".eternal-zoo"
+log_message "Creating virtual environment '.eternal-zoo'..."
+"$PYTHON_CMD" -m venv "$VENV_PATH" || handle_error $? "Failed to create virtual environment"
 
 log_message "Activating virtual environment..."
-source eternalzoo/bin/activate || handle_error $? "Failed to activate virtual environment."
+source "$VENV_PATH/bin/activate" || handle_error $? "Failed to activate virtual environment"
 log_message "Virtual environment activated."
 
-# Function: install_or_update_local_ai
-# Uninstalls and reinstalls the eternalzoo toolkit from the GitHub repository.
-install_or_update_local_ai() {
-    # Get the current branch
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-    # Get the URL of the remote (assume 'origin' or fallback to first remote)
-    REMOTE=$(git remote get-url origin 2>/dev/null)
-    if [ -z "$REMOTE" ]; then
-        REMOTE=$(git remote -v | awk 'NR==1{print $2}')
-    fi
+# Step 6: Install eternal-zoo
+log_message "Installing eternal-zoo..."
+pip install . || handle_error $? "Failed to install eternal-zoo."
+log_message "eternal-zoo installed successfully."
 
-    if [ -z "$BRANCH" ] || [ -z "$REMOTE" ]; then
-        handle_error 1 "Could not detect git remote or branch."
-        return 1
-    fi
-
-    # If remote is SSH, convert to HTTPS for pip
-    if [[ $REMOTE =~ ^git@([^:]+):(.+)$ ]]; then
-        REMOTE="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-    fi
-
-    pip uninstall eternalzoo -y || handle_error $? "Failed to uninstall eternalzoo."
-pip install -q "git+${REMOTE}@${BRANCH}" || handle_error $? "Failed to install/update eternalzoo toolkit."
-log_message "eternalzoo toolkit installed/updated from ${REMOTE}@${BRANCH}."
-}
-
-log_message "Setting up eternalzoo toolkit..."
-if pip show eternalzoo &>/dev/null; then
-    log_message "eternalzoo is installed. Checking for updates..."
-    INSTALLED_VERSION=$(pip show eternalzoo | grep Version | awk '{print $2}')
-    log_message "Current version: $INSTALLED_VERSION"
-    log_message "Checking latest version from repository..."
-    TEMP_VERSION_FILE=$(mktemp)
-    if curl -s https://raw.githubusercontent.com/eternalai-org/EternalZoo/main/eternal_zoo/__init__.py | grep -o "__version__ = \"[0-9.]*\"" | cut -d'"' -f2 > "$TEMP_VERSION_FILE"; then
-        REMOTE_VERSION=$(cat "$TEMP_VERSION_FILE")
-        rm "$TEMP_VERSION_FILE"
-        log_message "Latest version: $REMOTE_VERSION"
-        if [ "$(printf '%s\n' "$INSTALLED_VERSION" "$REMOTE_VERSION" | sort -V | head -n1)" = "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "$REMOTE_VERSION" ]; then
-            log_message "New version available. Updating..."
-            install_or_update_local_ai
-            log_message "eternalzoo toolkit updated to version $REMOTE_VERSION."
-        else
-            log_message "Already running the latest version. No update needed."
-        fi
-    else
-        log_message "Could not check latest version. Proceeding with update to be safe..."
-        install_or_update_local_ai
-        log_message "eternalzoo toolkit updated."
-    fi
-else
-    log_message "Installing eternalzoo toolkit..."
-    install_or_update_local_ai
-    log_message "eternalzoo toolkit installed."
-fi
-
-log_message "Setup complete. You can now use 'llama-server' and your Python virtual environment."
-
-# At the end of the script, print an informative message if PATH was updated
-if [ "${PATH_UPDATE_NEEDED:-0}" = "1" ]; then
-    echo
-    echo "[INFO] The llama-server command directory was added to your PATH in your shell rc file."
-    echo "      To use it in this session, run: export PATH=\"$LLAMA_WRAPPER_DIR:\$PATH\""
-    echo "      Or restart your terminal or run: source ~/.bashrc (or ~/.zshrc)"
-    echo
-fi
+log_message "Setup completed successfully."

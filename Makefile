@@ -27,6 +27,14 @@ install-macos:
 	@echo ""
 	MLX_FLUX_TAG=$(MLX_FLUX_TAG) MLX_OPENAI_SERVER_TAG=$(MLX_OPENAI_SERVER_TAG) ETERNAL_ZOO_TAG=$(ETERNAL_ZOO_TAG) bash mac.sh
 
+# Install target for Jetson
+.PHONY: install-jetson
+install-jetson:
+	@echo "Installing EternalZoo for Jetson:"
+	@echo "  ETERNAL_ZOO_TAG: $(ETERNAL_ZOO_TAG)"
+	@echo ""
+	ETERNAL_ZOO_TAG=$(ETERNAL_ZOO_TAG) bash jetson.sh
+
 # Clean target to remove virtual environment
 .PHONY: clean
 clean:

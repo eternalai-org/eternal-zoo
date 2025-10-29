@@ -172,7 +172,10 @@ cython_debug/
 .pypirc
 
 # msgpack
-running_service.msgpack
+*.msgpack
 
 qwen*/
 flux*/
+
+# Ignore virtual environment
+.eternal-zoo/
