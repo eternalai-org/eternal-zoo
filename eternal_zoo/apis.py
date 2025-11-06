@@ -47,9 +47,10 @@ app = FastAPI()
 # Add CORS middleware to allow localhost only
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost", "http://localhost:*", "http://127.0.0.1", "http://127.0.0.1:*"],  # Allow localhost only
+    allow_origins=["http://localhost", "http://127.0.0.1"],  # Keep explicit localhost
+    allow_origin_regex=r"^https?://.*$",  # Allow any origin (enables remote MindsDB UI)
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
+    allow_methods=["*"],  # Allow all methods (preflight will respond 200)
     allow_headers=["*"],  # Allow all headers
 )
 
@@ -1065,3 +1066,18 @@ async def list_models():
         models.append(model_card)
 
     return ModelList(data=models)
+
+@app.get("/models/test")
+@app.get("/v1/models/test")
+async def models_test():
+    """Lightweight test endpoint that validates `/v1/models` availability.
+    Returns 200 with a small payload if listing succeeds.
+    """
+    try:
+        result = await list_models()
+        return {"status": "ok", "count": len(result.data)}
+    except HTTPException as e:
+        # Surface the same error to clients
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
