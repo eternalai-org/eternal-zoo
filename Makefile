@@ -35,6 +35,13 @@ install-jetson:
 	@echo ""
 	ETERNAL_ZOO_TAG=$(ETERNAL_ZOO_TAG) bash jetson.sh
 
+.PHONY: install-ubuntu
+install-ubuntu:
+	@echo "Installing EternalZoo for Ubuntu:"
+	@echo "  ETERNAL_ZOO_TAG: $(ETERNAL_ZOO_TAG)"
+	@echo ""
+	ETERNAL_ZOO_TAG=$(ETERNAL_ZOO_TAG) bash ubuntu.sh
+
 # Clean target to remove virtual environment
 .PHONY: clean
 clean:
