@@ -187,9 +187,9 @@ def wait_for_health(port: int, timeout: int = 120) -> bool:
     start_time = time.time()
     wait_time = 0.5  # Start with shorter wait time for faster startup detection
     last_error = None
-    
+
     logger.info(f"Waiting for service health at {health_check_url} (timeout: {timeout}s)")
-    
+
     while time.time() - start_time < timeout:
         try:
             # Use shorter timeout for faster failure detection
@@ -204,23 +204,99 @@ def wait_for_health(port: int, timeout: int = 120) -> bool:
                 except ValueError:
                     # If JSON parsing fails, just check status code
                     pass
-                    
+
         except requests.exceptions.ConnectionError:
             last_error = "Connection refused"
         except requests.exceptions.Timeout:
             last_error = "Request timeout"
         except requests.exceptions.RequestException as e:
             last_error = str(e)[:100]
-        
+
         # Log progress every 30 seconds to avoid spam
         elapsed = time.time() - start_time
         if elapsed > 0 and int(elapsed) % 30 == 0:
             logger.debug(f"Still waiting for health check... ({elapsed:.0f}s elapsed, last error: {last_error})")
-        
+
         time.sleep(wait_time)
         # Exponential backoff with cap at 10 seconds
         wait_time = min(wait_time * 1.5, 10)
-    
+
     logger.error(f"Health check failed after {timeout}s. Last error: {last_error}")
     return False
-    
+
+
+def is_jetson():
+    """Check if running on NVIDIA Jetson device."""
+    return os.path.exists('/etc/nv_tegra_release')
+
+
+def get_jetson_llama_container():
+    """Get the correct llama-server container for Jetson using autotag."""
+    if not is_jetson():
+        return None
+
+    try:
+        # Use subprocess to run autotag commands
+        import subprocess
+
+        # Try custom build first
+        result = subprocess.run(['autotag', 'my-llama-build-mmsupport'],
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+
+        # Fallback to standard llama_cpp
+        result = subprocess.run(['autotag', 'llama_cpp'],
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError):
+        pass
+
+    # Final fallback
+    return 'my-llama-build-mmsupport:latest'
+
+
+def get_cuda_memory_jetson(project_dir=None, models_dir=None, container=None):
+    """Get CUDA memory info on Jetson using docker container with CUDA program."""
+    if not is_jetson():
+        return None, None
+
+    # Use provided paths or defaults
+    if project_dir is None:
+        project_dir = os.environ.get('ETERNAL_ZOO_PROJECT_DIR', '/home/sniffski/Documents/EternalAI/eternal-zoo')
+    if models_dir is None:
+        models_dir = os.environ.get('ETERNAL_ZOO_MODELS_DIR', '/home/sniffski/.eternal-zoo/models')
+    if container is None:
+        container = get_jetson_llama_container()
+
+    cmd = f"""docker run --runtime nvidia --rm --network=host -v {project_dir}:{project_dir} -v {models_dir}:{models_dir} {container} sh -c "
+cat > memcheck.cu << 'EOF'
+#include <iostream>
+#include <cuda_runtime.h>
+int main() {{
+    size_t free_byte, total_byte;
+    cudaError_t cuda_status = cudaMemGetInfo(&free_byte, &total_byte);
+    if (cudaSuccess != cuda_status) {{
+        std::cout << \"Error: \" << cudaGetErrorString(cuda_status) << std::endl;
+        return 1;
+    }}
+    std::cout << free_byte << \" \" << total_byte << std::endl;
+    return 0;
+}}
+EOF
+nvcc memcheck.cu -o memcheck 2>/dev/null && ./memcheck" """
+
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                free = int(parts[0])
+                total = int(parts[1])
+                return free, total
+    except:
+        pass
+    return None, None
+

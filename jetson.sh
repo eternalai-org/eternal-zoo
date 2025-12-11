@@ -247,46 +247,74 @@ fi
 rm -f "$MM_SUPPORT_CHECK_OUTPUT"
 
 # Only launch the build container if the image does not already exist and NEED_CUSTOM_LLAMA_BUILD=1
+# decide if we need a custom build
 if [ "$NEED_CUSTOM_LLAMA_BUILD" = "1" ]; then
-    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^my-llama-build-mmsupport:latest$"; then
-        log_message "Building my-llama-build-mmsupport image (container will be launched)..."
-        nohup script -q -c "jetson-containers run --name my-llama-build-mmsupport $(autotag llama_cpp) bash -c 'apt-get update && apt-get install -y git cmake build-essential && rm -rf /opt/llama.cpp && git clone https://github.com/ggerganov/llama.cpp.git /opt/llama.cpp && cd /opt/llama.cpp && rm -rf build && mkdir build && cd build && cmake .. -DGGML_CUDA=ON -DLLAVA_BUILD=ON -DLLAMA_BUILD_SERVER=ON && make -j\$(nproc) && make install && echo \"/usr/local/lib\" > /etc/ld.so.conf.d/local.conf && ldconfig && touch /tmp/build_complete && tail -f /dev/null'" /dev/null > /tmp/build.log 2>&1 &
+    # find latest commit on llama.cpp master
+    LLAMA_REPO="https://github.com/ggerganov/llama.cpp.git"
+    LATEST_SHA=$(git ls-remote "$LLAMA_REPO" HEAD | awk '{print $1}')
+    SHORT_SHA=${LATEST_SHA:0:7}
+    IMAGE_TAG="my-llama-build-mmsupport:${SHORT_SHA}"
 
-        # Wait for the container to appear (timeout after 60 seconds)
+    if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_TAG}$"; then
+        log_message "Building ${IMAGE_TAG} (latest llama.cpp @ ${SHORT_SHA})..."
+
+        # run a build container that checks out the exact commit
+        nohup script -q -c "jetson-containers run --name my-llama-build-mmsupport $(autotag llama_cpp) bash -c '
+            set -euo pipefail
+            apt-get update
+            apt-get install -y git cmake build-essential
+            rm -rf /opt/llama.cpp
+            git clone $LLAMA_REPO /opt/llama.cpp
+            cd /opt/llama.cpp
+            git fetch origin ${LATEST_SHA}
+            git checkout ${LATEST_SHA}
+            rm -rf build && mkdir build && cd build
+            cmake .. -DGGML_CUDA=ON -DLLAVA_BUILD=ON -DLLAMA_BUILD_SERVER=ON
+            make -j\$(nproc)
+            make install
+            echo \"/usr/local/lib\" > /etc/ld.so.conf.d/local.conf
+            ldconfig
+            echo ${LATEST_SHA} > /opt/llama.cpp/.built_commit
+            touch /tmp/build_complete
+            tail -f /dev/null
+        '" /dev/null > /tmp/build.log 2>&1 &
+
+        # wait for container to appear (timeout after 60s)
         for i in {1..12}; do
-            if docker ps -a --format '{{.Names}}' | grep -q "^my-llama-build-mmsupport$"; then
-                log_message "Container my-llama-build-mmsupport is now running."
-                break
-            fi
+            docker ps -a --format '{{.Names}}' | grep -q "^my-llama-build-mmsupport$" && {
+                log_message "Container my-llama-build-mmsupport is now running."; break; }
             log_message "Waiting for container my-llama-build-mmsupport to start..."
             sleep 5
         done
 
-        # If still not found, exit with error
         if ! docker ps -a --format '{{.Names}}' | grep -q "^my-llama-build-mmsupport$"; then
             log_error "Container my-llama-build-mmsupport did not start within expected time."
             exit 1
         fi
 
-        # Now enter the build-complete waiting loop as before
+        # wait for build to finish
         while true; do
-            OUTPUT=$(docker exec my-llama-build-mmsupport test -f /tmp/build_complete 2>&1)
-            if echo "$OUTPUT" | grep -q "No such container"; then
-                log_error "No such container: my-llama-build-mmsupport"
-                exit 1
-            fi
             if docker exec my-llama-build-mmsupport test -f /tmp/build_complete 2>/dev/null; then
                 log_message "Build complete! Committing container..."
-                docker commit my-llama-build-mmsupport my-llama-build-mmsupport
-                log_message "Committed to my-llama-build-mmsupport!"
-                docker stop my-llama-build-mmsupport
+                docker commit \
+                    --change "LABEL llama_repo=${LLAMA_REPO}" \
+                    --change "LABEL llama_commit=${LATEST_SHA}" \
+                    --change "LABEL llama_commit_short=${SHORT_SHA}" \
+                    my-llama-build-mmsupport "${IMAGE_TAG}"
+
+                # also update 'latest' to this commit for convenience
+                docker tag "${IMAGE_TAG}" my-llama-build-mmsupport:latest
+
+                log_message "Committed to ${IMAGE_TAG} and retagged :latest"
+                docker stop my-llama-build-mmsupport >/dev/null
+                docker rm my-llama-build-mmsupport >/dev/null
                 break
             fi
             log_message "Waiting for build to finish inside container..."
             sleep 10
         done
     else
-        log_message "Image my-llama-build-mmsupport:latest already exists. Skipping build container launch."
+        log_message "Image ${IMAGE_TAG} already exists (up to date). Skipping build."
     fi
 else
     log_message "Skipping custom build of llama_cpp; native image supports --mmproj."

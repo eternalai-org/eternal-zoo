@@ -633,8 +633,8 @@ class RequestProcessor:
                     break
             
             if target_model is None:
-                target_model = available_models[0]
-                model_requested = target_model["model_id"]
+                logger.error(f"[{request_id}] Requested model '{model_requested}' not found in available models")
+                return False
             
             if target_model["active"]:
                 return True

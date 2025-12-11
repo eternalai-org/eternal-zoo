@@ -13,7 +13,7 @@ import pkg_resources
 from pathlib import Path
 from loguru import logger
 from eternal_zoo.config import DEFAULT_CONFIG
-from eternal_zoo.utils import wait_for_health
+from eternal_zoo.utils import wait_for_health, is_jetson, get_cuda_memory_jetson
 from typing import Optional, Dict, Any, List
 
 class EternalZooServiceError(Exception):
@@ -96,6 +96,9 @@ class EternalZooManager:
         # stop the service if it is already running
         self.stop()
 
+        # Perform GPU memory cleanup to ensure clean state from previous runs
+        self._perform_startup_gpu_cleanup()
+
         ai_services = []
         api_service = {
             "host": host,
@@ -135,6 +138,21 @@ class EternalZooManager:
 
             if not config.get("on_demand", False):
                 try:
+                    # Memory validation before starting subprocess
+                    # Use pre-calculated memory requirements from config (calculated in load_model_metadata)
+                    memory_reqs = ai_service.get("memory_requirements", {})
+                    model_memory_gb = memory_reqs.get("ram_gb", self._estimate_model_ram_gb(ai_service))
+                    available_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+
+                    logger.info(f"Memory check for {config.get('model_name', 'unknown')}: required={model_memory_gb:.2f}GB, available RAM={available_ram_gb:.2f}GB")
+                    if "memory_requirements" in ai_service:
+                        mem_info = ai_service["memory_requirements"]
+                        logger.info(f"Using pre-calculated memory: RAM={mem_info['ram_gb']:.2f}GB, GPU={mem_info['gpu_ram_gb']:.2f}GB, KV={mem_info['kv_cache_gb']:.2f}GB")
+
+                    if available_ram_gb < model_memory_gb:
+                        logger.error(f"Insufficient RAM to start model: need {model_memory_gb:.2f}GB, have {available_ram_gb:.2f}GB")
+                        return False
+
                     # append port and host to the running_ai_command
                     running_ai_command.extend(["--port", str(local_model_port), "--host", host])
                     with open(self.ai_log_file, 'w') as stderr_log:
@@ -223,31 +241,31 @@ class EternalZooManager:
             os.remove(self.service_info_file)
             logger.info(f"Service info file removed: {self.service_info_file}")
         
-        # always force kill the service
+        # attempt graceful shutdown first, fallback to force if needed
         ai_services = []
         ai_service_stop = False
         api_service_stop = False
-        
+
         if self.ai_service_file.exists():
             with open(self.ai_service_file, 'rb') as f:
                 ai_services = msgpack.unpack(f)
             for ai_service in ai_services:
                 pid = ai_service.get("pid", None)
                 if pid and psutil.pid_exists(pid):
-                    ai_service_stop = self._terminate_process_safely(pid, "EternalZoo AI Service", force=True)
-            
+                    ai_service_stop = self._terminate_process_safely(pid, "EternalZoo AI Service", force=False)
+
             if ai_service_stop:
                 os.remove(self.ai_service_file)
                 logger.info(f"AI service metadata file removed: {self.ai_service_file}")
             else:
                 logger.warning("Failed to stop EternalZoo AI Service")
-        
+
         if self.api_service_file.exists():
             with open(self.api_service_file, 'rb') as f:
                 api_service = msgpack.unpack(f)
             pid = api_service.get("pid", None)
             if pid and psutil.pid_exists(pid):
-                api_service_stop = self._terminate_process_safely(pid, "EternalZoo API Service", force=True)
+                api_service_stop = self._terminate_process_safely(pid, "EternalZoo API Service", force=False)
             
             if api_service_stop:
                 os.remove(self.api_service_file)
@@ -255,6 +273,448 @@ class EternalZooManager:
             else:
                 logger.warning("Failed to stop EternalZoo API Service")
         
+        # Verify GPU memory cleanup if applicable
+        if not self._verify_cuda_memory_released():
+            logger.warning("GPU memory may not have been fully released after shutdown")
+            # Attempt cleanup
+            import asyncio
+            asyncio.run(self._attempt_cuda_reset())
+
+        return True
+
+    def _get_platform_info(self) -> dict:
+        """Detect platform and GPU information for cleanup strategy."""
+        import platform
+        system = platform.system().lower()
+
+        gpu_info = self._detect_gpu_info()
+        return {
+            'os': system,
+            'gpu_vendor': gpu_info['vendor'],
+            'gpu_present': gpu_info['present'],
+            'gpu_memory_mb': gpu_info['memory_mb']
+        }
+
+    def _detect_gpu_info(self) -> dict:
+        """Detect GPU vendor and capabilities."""
+        # Try NVIDIA first
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            total_mb = info.total / (1024 * 1024)
+            return {'vendor': 'nvidia', 'present': True, 'memory_mb': total_mb}
+        except:
+            pass
+
+        # Try AMD/NVIDIA via nvidia-smi (works for some AMD cards too)
+        try:
+            import subprocess
+            result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+                                  capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                total_mb = int(result.stdout.strip().split('\n')[0])
+                return {'vendor': 'nvidia', 'present': True, 'memory_mb': total_mb}
+        except:
+            pass
+
+        # Mac OS detection
+        import platform
+        if platform.system() == 'Darwin':
+            try:
+                # Try to detect Apple Silicon vs Intel
+                import subprocess
+                result = subprocess.run(['system_profiler', 'SPHardwareDataType'],
+                                      capture_output=True, text=True, timeout=5)
+                if 'Apple M' in result.stdout or 'Apple Silicon' in result.stdout:
+                    return {'vendor': 'apple_silicon', 'present': True, 'memory_mb': None}
+                else:
+                    return {'vendor': 'mac_intel', 'present': True, 'memory_mb': None}
+            except:
+                return {'vendor': 'mac_unknown', 'present': True, 'memory_mb': None}
+
+        # Fallback: assume some GPU is present
+        return {'vendor': 'unknown', 'present': True, 'memory_mb': None}
+
+    def _get_gpu_memory_usage(self) -> str:
+        """Get current GPU memory usage as a formatted string. Returns 'unavailable' if checks fail."""
+        # Try modern nvidia-ml-py first (replacement for deprecated pynvml)
+        try:
+            import nvidia_ml_py as nvml
+            nvml.nvmlInit()
+            handle = nvml.nvmlDeviceGetHandleByIndex(0)
+            info = nvml.nvmlDeviceGetMemoryInfo(handle)
+            used_mb = info.used / (1024 * 1024)
+            total_mb = info.total / (1024 * 1024)
+            return f"{used_mb:.1f}MB/{total_mb:.1f}MB"
+        except Exception:
+            pass
+
+        # Fallback to deprecated pynvml
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            used_mb = info.used / (1024 * 1024)
+            total_mb = info.total / (1024 * 1024)
+            return f"{used_mb:.1f}MB/{total_mb:.1f}MB"
+        except Exception:
+            pass
+
+        # Fallback to nvidia-smi (may not work on Jetson)
+        try:
+            import subprocess
+            result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if lines and ',' in lines[0]:
+                    parts = lines[0].split(', ')
+                    if len(parts) == 2 and parts[0] != '[Not Supported]' and parts[1] != '[Not Supported]':
+                        try:
+                            used_mb, total_mb = map(float, parts)
+                            return f"{used_mb:.1f}MB/{total_mb:.1f}MB"
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+        # Final fallback: try tegrastats for Jetson devices
+        try:
+            import subprocess
+            result = subprocess.run(['tegrastats', '--interval', '1', '--count', '1'],
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and 'GR3D' in result.stdout:
+                # Parse tegrastats output for GPU memory (simplified)
+                # This is a basic implementation - could be improved
+                return "tegrastats-available"
+        except Exception:
+            pass
+
+        return "unavailable"
+
+    def _perform_startup_gpu_cleanup(self) -> None:
+        """Perform GPU memory cleanup at startup to ensure clean state from previous runs."""
+        try:
+            platform_info = self._get_platform_info()
+            logger.info(f"Performing startup GPU cleanup on {platform_info['os']} with {platform_info['gpu_vendor']} GPU")
+
+            if platform_info['gpu_vendor'] == 'nvidia':
+                self._cleanup_nvidia_gpu_memory()
+            elif platform_info['os'] == 'darwin':
+                self._cleanup_metal_gpu_memory()
+            else:
+                logger.info("No specific GPU cleanup needed for this platform")
+
+        except Exception as e:
+            logger.warning(f"Startup GPU cleanup failed: {e}")
+
+    def _cleanup_nvidia_gpu_memory(self) -> None:
+        """Attempt to clean up NVIDIA GPU memory state."""
+        try:
+            # Try to reset GPU memory state
+            import subprocess
+            # Use nvidia-smi to reset GPU memory if possible
+            result = subprocess.run(['nvidia-smi', '--gpu-reset'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                logger.info("NVIDIA GPU reset completed")
+            else:
+                logger.debug(f"NVIDIA GPU reset not available: {result.stderr}")
+
+            # Check current GPU memory state
+            gpu_mem = self._get_gpu_memory_usage()
+            logger.info(f"GPU memory state after cleanup: {gpu_mem}")
+
+        except Exception as e:
+            logger.debug(f"NVIDIA GPU cleanup failed: {e}")
+
+    def _cleanup_metal_gpu_memory(self) -> None:
+        """Attempt to clean up Metal GPU memory state on macOS."""
+        try:
+            # On macOS, we can't directly reset GPU memory, but we can log the current state
+            logger.info("Metal GPU cleanup - monitoring memory state")
+            # The async cleanup monitoring will handle any issues during actual loading
+        except Exception as e:
+            logger.debug(f"Metal GPU cleanup failed: {e}")
+
+    async def _monitor_memory_cleanup_async(self, platform_info: dict, initial_ram_gb: float, initial_gpu_mb: float) -> bool:
+        """Perform GPU memory cleanup at startup to ensure clean state from previous runs."""
+        try:
+            platform_info = self._get_platform_info()
+            logger.info(f"Performing startup GPU cleanup on {platform_info['os']} with {platform_info['gpu_vendor']} GPU")
+
+            if platform_info['gpu_vendor'] == 'nvidia':
+                self._cleanup_nvidia_gpu_memory()
+            elif platform_info['os'] == 'darwin':
+                self._cleanup_metal_gpu_memory()
+            else:
+                logger.info("No specific GPU cleanup needed for this platform")
+
+        except Exception as e:
+            logger.warning(f"Startup GPU cleanup failed: {e}")
+
+    def _cleanup_nvidia_gpu_memory(self) -> None:
+        """Attempt to clean up NVIDIA GPU memory state."""
+        try:
+            # Try to reset GPU memory state
+            import subprocess
+            # Use nvidia-smi to reset GPU memory if possible
+            result = subprocess.run(['nvidia-smi', '--gpu-reset'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                logger.info("NVIDIA GPU reset completed")
+            else:
+                logger.debug(f"NVIDIA GPU reset not available: {result.stderr}")
+
+            # Check current GPU memory state
+            gpu_mem = self._get_gpu_memory_usage()
+            logger.info(f"GPU memory state after cleanup: {gpu_mem}")
+
+        except Exception as e:
+            logger.debug(f"NVIDIA GPU cleanup failed: {e}")
+
+    def _cleanup_metal_gpu_memory(self) -> None:
+        """Attempt to clean up Metal GPU memory state on macOS."""
+        try:
+            # On macOS, we can't directly reset GPU memory, but we can log the current state
+            logger.info("Metal GPU cleanup - monitoring memory state")
+            # The async cleanup monitoring will handle any issues during actual loading
+        except Exception as e:
+            logger.debug(f"Metal GPU cleanup failed: {e}")
+
+    async def _monitor_memory_cleanup_async(self, platform_info: dict, initial_ram_gb: float, initial_gpu_mb: float) -> bool:
+        """Monitor memory cleanup completion using platform-specific callbacks."""
+        completion_event = asyncio.Event()
+        monitoring_tasks = []
+
+        try:
+            # Create platform-specific monitoring tasks
+            if platform_info['gpu_vendor'] == 'nvidia':
+                monitoring_tasks.append(self._monitor_cuda_cleanup_async(completion_event, initial_gpu_mb))
+            elif platform_info['os'] == 'darwin':
+                monitoring_tasks.append(self._monitor_metal_cleanup_async(completion_event))
+            else:
+                # Generic RAM-only monitoring
+                monitoring_tasks.append(self._monitor_ram_cleanup_async(completion_event, initial_ram_gb))
+
+            # Always monitor RAM reclamation
+            monitoring_tasks.append(self._monitor_ram_cleanup_async(completion_event, initial_ram_gb))
+
+            # Start all monitoring tasks
+            started_tasks = []
+            for coro in monitoring_tasks:
+                task = asyncio.create_task(coro)
+                started_tasks.append(task)
+
+            # Wait for completion with platform-specific timeout
+            timeout = self._get_cleanup_timeout(platform_info)
+            try:
+                await asyncio.wait_for(completion_event.wait(), timeout=timeout)
+                logger.info("✅ Memory cleanup completed successfully")
+                return True
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️ Memory cleanup monitoring timed out after {timeout}s, proceeding anyway")
+                return True  # Don't block model loading
+
+        except Exception as e:
+            logger.error(f"Memory cleanup monitoring failed: {e}, proceeding anyway")
+            return True
+        finally:
+            # Cancel any remaining monitoring tasks
+            for task in started_tasks:
+                if not task.done():
+                    task.cancel()
+
+    async def _monitor_cuda_cleanup_async(self, completion_event: asyncio.Event, initial_gpu_mb: float) -> None:
+        """Monitor CUDA context cleanup via nvidia-ml-py or pynvml."""
+        if initial_gpu_mb <= 0:
+            return
+
+        try:
+            # Try modern nvidia-ml-py first
+            try:
+                import nvidia_ml_py as nvml
+            except ImportError:
+                import pynvml as nvml
+
+            nvml.nvmlInit()
+            handle = nvml.nvmlDeviceGetHandleByIndex(0)
+
+            while not completion_event.is_set():
+                info = nvml.nvmlDeviceGetMemoryInfo(handle)
+                current_used_mb = info.used / (1024 * 1024)
+                freed_mb = initial_gpu_mb - current_used_mb
+
+                # Consider cleanup complete if we've freed 80% of initial GPU memory
+                if freed_mb > (initial_gpu_mb * 0.8):
+                    logger.info(f"CUDA cleanup detected: {freed_mb:.1f}MB GPU memory freed")
+                    completion_event.set()
+                    return
+
+                await asyncio.sleep(0.2)  # Check every 200ms
+
+        except Exception as e:
+            logger.debug(f"CUDA cleanup monitoring failed: {e}")
+
+    async def _monitor_metal_cleanup_async(self, completion_event: asyncio.Event) -> None:
+        """Monitor Metal framework cleanup on macOS."""
+        try:
+            # Metal cleanup is typically much faster than CUDA
+            # Wait a bit then assume cleanup is complete
+            await asyncio.sleep(0.5)
+            logger.info("Metal cleanup assumed complete (fast GPU context)")
+            completion_event.set()
+        except Exception as e:
+            logger.debug(f"Metal cleanup monitoring failed: {e}")
+
+    async def _monitor_ram_cleanup_async(self, completion_event: asyncio.Event, initial_ram_gb: float) -> None:
+        """Monitor RAM reclamation as a fallback indicator."""
+        try:
+            while not completion_event.is_set():
+                current_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+                reclaimed_gb = initial_ram_gb - current_ram_gb
+
+                # Consider cleanup complete if we've reclaimed significant RAM
+                if reclaimed_gb > 0.5:  # 512MB threshold
+                    logger.info(f"RAM cleanup detected: {reclaimed_gb:.2f}GB reclaimed")
+                    completion_event.set()
+                    return
+
+                await asyncio.sleep(0.5)  # Check every 500ms
+
+        except Exception as e:
+            logger.debug(f"RAM cleanup monitoring failed: {e}")
+
+    def _get_cleanup_timeout(self, platform_info: dict) -> float:
+        """Get platform-specific cleanup timeout."""
+        timeouts = {
+            'nvidia': 15.0,    # CUDA cleanup can take time
+            'apple_silicon': 2.0,  # Very fast
+            'mac_intel': 3.0,  # Metal is reasonably fast
+            'cpu_only': 1.0    # Minimal for CPU-only
+        }
+        return timeouts.get(platform_info.get('gpu_vendor', 'cpu_only'), 5.0)
+
+    async def _attempt_cuda_reset(self) -> bool:
+        """Attempt CUDA device reset to force memory cleanup. Returns True if successful."""
+        logger.info("Attempting CUDA device reset for memory cleanup...")
+
+        # Jetson-specific handling
+        if is_jetson():
+            logger.warning("Jetson detected - CUDA memory may persist after process termination. Attempting cleanup.")
+            # For Jetson, try driver reload if we have sudo
+            try:
+                import subprocess
+                # Check if we have sudo
+                sudo_check = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5)
+                if sudo_check.returncode == 0:
+                    logger.info("Attempting NVIDIA driver reload on Jetson...")
+                    # Unload and reload NVIDIA driver
+                    unload = await asyncio.create_subprocess_exec(
+                        'sudo', 'rmmod', 'nvidia',
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL
+                    )
+                    await asyncio.wait_for(unload.wait(), timeout=10.0)
+                    await asyncio.sleep(0.5)
+                    load = await asyncio.create_subprocess_exec(
+                        'sudo', 'nvidia-smi', '-a',  # This should reload the driver
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL
+                    )
+                    await asyncio.wait_for(load.wait(), timeout=10.0)
+                    logger.info("NVIDIA driver reload completed on Jetson")
+                    await asyncio.sleep(1.0)  # Allow time for reload
+                    return True
+                else:
+                    logger.warning("No sudo access for driver reload on Jetson")
+            except (asyncio.TimeoutError, subprocess.CalledProcessError, FileNotFoundError) as e:
+                logger.warning(f"Jetson driver reload failed: {e}")
+            return False  # Don't try other methods on Jetson
+
+        try:
+            # Try modern nvidia-ml-py first for device reset
+            try:
+                import nvidia_ml_py as nvml
+            except ImportError:
+                import pynvml as nvml
+
+            nvml.nvmlInit()
+            handle = nvml.nvmlDeviceGetHandleByIndex(0)
+
+            # Try to reset GPU by toggling persistence mode
+            try:
+                current_mode = nvml.nvmlDeviceGetPersistenceMode(handle)
+                # Toggle persistence mode to force cleanup
+                nvml.nvmlDeviceSetPersistenceMode(handle, 0)  # Disable
+                await asyncio.sleep(0.1)
+                nvml.nvmlDeviceSetPersistenceMode(handle, 1)  # Re-enable
+                logger.info("CUDA device reset completed")
+                return True
+            except Exception as e:
+                logger.warning(f"NVML device reset failed: {e}")
+
+        except Exception:
+            logger.debug("NVML not available for CUDA reset")
+
+        # Fallback: try nvidia-smi gpu reset
+        try:
+            logger.info("Attempting CUDA reset via nvidia-smi...")
+            result = await asyncio.create_subprocess_exec(
+                'nvidia-smi', '--gpu-reset',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(result.wait(), timeout=10.0)
+            if result.returncode == 0:
+                logger.info("CUDA device reset via nvidia-smi completed")
+                await asyncio.sleep(0.5)  # Allow time for reset to take effect
+                return True
+            else:
+                logger.warning(f"nvidia-smi gpu reset failed with return code: {result.returncode}")
+        except (asyncio.TimeoutError, FileNotFoundError) as e:
+            logger.warning(f"nvidia-smi reset unavailable: {e}")
+
+        logger.warning("All CUDA reset methods failed")
+        return False
+
+    def _verify_cuda_memory_released(self) -> bool:
+        """Verify CUDA memory cleanup after shutdown. Returns True if memory appears clean or check unavailable."""
+        # On Jetson, memory checks are unreliable due to unified memory and persistent allocations
+        # Always attempt cleanup on Jetson
+        if is_jetson():
+            logger.info("Jetson detected - CUDA memory verification unreliable, will attempt cleanup")
+            return False  # Force cleanup attempt
+
+        try:
+            # Try pynvml first
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            used_mb = info.used / (1024 * 1024)
+            logger.info(f"GPU memory after shutdown: {used_mb:.1f}MB used out of {info.total / (1024*1024):.1f}MB")
+            return used_mb < 500  # Consider clean if less than 500MB used
+        except ImportError:
+            # Fallback to nvidia-smi
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    if lines:
+                        used_mb, total_mb = map(int, lines[0].split(', '))
+                        logger.info(f"GPU memory after shutdown: {used_mb}MB used out of {total_mb}MB")
+                        return used_mb < 500
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError):
+                pass
+        except Exception as e:
+            logger.debug(f"CUDA memory verification failed: {e}")
+
+        # If all checks fail, assume it's clean to avoid false positives
+        logger.debug("CUDA memory verification unavailable - assuming clean")
         return True
 
     def _terminate_process_safely(self, pid: int, process_name: str, timeout: int = 15, use_process_group: bool = True, force: bool = False) -> bool:
@@ -358,7 +818,7 @@ class EternalZooManager:
                     time.sleep(wait_time)
                     elapsed += wait_time
                     wait_time = min(wait_time * 1.5, 2.0)  # Cap at 2 seconds
-                    
+
                     # Check if process became zombie
                     try:
                         if process.status() == psutil.STATUS_ZOMBIE:
@@ -446,7 +906,7 @@ class EternalZooManager:
             logger.error(f"Error terminating {process_name} (PID: {pid}): {e}")
             return False
 
-    async def _terminate_process_safely_async(self, pid: int, process_name: str, timeout: int = 15, use_process_group: bool = True) -> bool:
+    async def _terminate_process_safely_async(self, pid: int, process_name: str, timeout: int = 15, use_process_group: bool = True, force: bool = False) -> bool:
         """
         Async version of _terminate_process_safely for use in async contexts.
         
@@ -491,59 +951,66 @@ class EternalZooManager:
                 pass
             
             # Phase 1: Graceful termination
-            try:
-                if use_process_group:
-                    # Try process group termination first
-                    try:
-                        pgid = os.getpgid(pid)
-                        os.killpg(pgid, signal.SIGTERM)
-                        logger.debug(f"Sent SIGTERM to process group {pgid}")
-                    except (ProcessLookupError, OSError, PermissionError):
-                        # Fall back to individual process termination
+            if not force:
+                try:
+                    if use_process_group:
+                        # Try process group termination first
+                        try:
+                            pgid = os.getpgid(pid)
+                            os.killpg(pgid, signal.SIGTERM)
+                            logger.debug(f"Sent SIGTERM to process group {pgid}")
+                        except (ProcessLookupError, OSError, PermissionError):
+                            # Fall back to individual process termination
+                            process.terminate()
+                            logger.debug(f"Sent SIGTERM to process {pid}")
+
+                            for child in children:
+                                try:
+                                    child.terminate()
+                                    logger.debug(f"Sent SIGTERM to child process {child.pid}")
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
+                    else:
+                        # Individual process termination
                         process.terminate()
                         logger.debug(f"Sent SIGTERM to process {pid}")
-                        
+
                         for child in children:
                             try:
                                 child.terminate()
                                 logger.debug(f"Sent SIGTERM to child process {child.pid}")
                             except (psutil.NoSuchProcess, psutil.AccessDenied):
                                 pass
-                else:
-                    # Individual process termination
-                    process.terminate()
-                    logger.debug(f"Sent SIGTERM to process {pid}")
-                    
-                    for child in children:
-                        try:
-                            child.terminate()
-                            logger.debug(f"Sent SIGTERM to child process {child.pid}")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                            
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                logger.info(f"Process {process_name} disappeared during termination")
-                return True
-            
-            # Wait for graceful termination with async sleep
-            wait_time = 0.1
-            elapsed = 0
-            while elapsed < timeout and psutil.pid_exists(pid):
-                await asyncio.sleep(wait_time)
-                elapsed += wait_time
-                wait_time = min(wait_time * 1.5, 2.0)  # Cap at 2 seconds
-                
-                # Check if process became zombie
-                try:
-                    if process.status() == psutil.STATUS_ZOMBIE:
-                        logger.info(f"{process_name} became zombie, considering stopped")
-                        return True
+
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    logger.info(f"Process {process_name} disappeared during termination")
                     return True
-            
+
+                # Wait for graceful termination with async sleep
+                wait_time = 0.1
+                elapsed = 0
+                while elapsed < timeout and psutil.pid_exists(pid):
+                    await asyncio.sleep(wait_time)
+                    elapsed += wait_time
+                    wait_time = min(wait_time * 1.5, 2.0)  # Cap at 2 seconds
+
+                    # Check if process became zombie
+                    try:
+                        if process.status() == psutil.STATUS_ZOMBIE:
+                            logger.info(f"{process_name} became zombie, considering stopped")
+                            return True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        return True
+            else:
+                logger.info(f"Force mode enabled - skipping graceful termination for {process_name} (PID: {pid})")
+
             # Phase 2: Force termination if still running
             if psutil.pid_exists(pid):
                 logger.warning(f"Force killing {process_name} (PID: {pid})")
+
+                # Attempt CUDA reset before force kill to ensure GPU memory cleanup
+                await self._attempt_cuda_reset()
+
                 try:
                     # Refresh children list
                     children = []
@@ -552,7 +1019,7 @@ class EternalZooManager:
                         children = process.children(recursive=True)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
-                    
+
                     if use_process_group:
                         # Try process group kill
                         try:
@@ -563,7 +1030,7 @@ class EternalZooManager:
                             # Fall back to individual kill
                             process.kill()
                             logger.debug(f"Sent SIGKILL to process {pid}")
-                            
+
                             for child in children:
                                 try:
                                     child.kill()
@@ -574,14 +1041,14 @@ class EternalZooManager:
                         # Individual process kill
                         process.kill()
                         logger.debug(f"Sent SIGKILL to process {pid}")
-                        
+
                         for child in children:
                             try:
                                 child.kill()
                                 logger.debug(f"Sent SIGKILL to child process {child.pid}")
                             except (psutil.NoSuchProcess, psutil.AccessDenied):
                                 pass
-                                
+
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     logger.info(f"Process {process_name} disappeared during force kill")
                     return True
@@ -696,13 +1163,315 @@ class EternalZooManager:
             return None
         return best_practice_path
     
+    def _calculate_model_memory_requirements(self, ai_service: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Calculate and return detailed memory requirements for a model.
+        Returns dict with: ram_gb, gpu_ram_gb, kv_cache_gb, weights_gb
+
+        Uses GGUF metadata when available, falls back to file-size heuristics.
+        """
+        backend = ai_service.get("backend", "gguf")
+        model_path = ai_service.get("model")
+
+        # Get context length from config or default
+        context_length = ai_service.get("context_length", DEFAULT_CONFIG.model.DEFAULT_CONTEXT_LENGTH)
+
+        # Get GPU layers from config (default to full offload for GGUF)
+        gpu_layers = ai_service.get("gpu_layers", 9999 if backend == "gguf" else 0)
+
+        # Initialize with conservative defaults
+        memory_reqs = {
+            "ram_gb": 12.0,
+            "gpu_ram_gb": 0.0,
+            "kv_cache_gb": 0.0,
+            "weights_gb": 0.0
+        }
+
+        if backend == "gguf" and model_path and os.path.exists(model_path):
+            try:
+                import gguf
+                try:
+                    reader = gguf.GGUFReader(model_path)
+                except Exception:
+                    with open(model_path, "rb") as f:
+                        reader = gguf.GGUFReader(f)
+
+                # Extract metadata using gguf-mem-info.py approach
+                arch = self._get_scalar_field(reader, "general.architecture")
+                if arch is None:
+                    raise RuntimeError("general.architecture not found in GGUF metadata")
+
+                arch = str(arch)
+                prefix = arch
+
+                def fp(suffix: str) -> Optional[int]:
+                    v = self._get_scalar_field(reader, f"{prefix}.{suffix}")
+                    return int(v) if v is not None else None
+
+                n_layer = fp("block_count")
+                n_embd = fp("embedding_length")
+                n_head = fp("attention.head_count")
+                n_head_kv = fp("attention.head_count_kv") or n_head
+
+                if n_layer is None or n_embd is None:
+                    raise RuntimeError("Missing n_layer or n_embd in GGUF metadata")
+
+                # KV cache calculation (same as gguf-mem-info.py)
+                kv_bytes_per_elem = 2  # Default f16
+                kv_dtype = ai_service.get("kv_dtype", "f16")
+                if isinstance(kv_dtype, str):
+                    kv_dtype_l = kv_dtype.lower()
+                    if kv_dtype_l in ("f16", "bf16"):
+                        kv_bytes_per_elem = 2
+                    elif kv_dtype_l in ("f32", "float32"):
+                        kv_bytes_per_elem = 4
+                    elif kv_dtype_l in ("q8", "q8_kv", "int8"):
+                        kv_bytes_per_elem = 1
+
+                kv_bytes = 2 * n_layer * context_length * n_embd * kv_bytes_per_elem
+                kv_cache_gb = kv_bytes / (1024 ** 3)
+
+                # File size for weights
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+
+                # GPU/CPU split calculation (similar to gguf-mem-info.py)
+                gpu_layers_clamped = max(0, min(gpu_layers, n_layer))
+                if n_layer and gpu_layers_clamped > 0:
+                    frac = float(gpu_layers_clamped) / float(n_layer)
+                    gpu_weight_bytes = int(os.path.getsize(model_path) * frac * 0.9)  # ~90% weights are per-layer
+                    cpu_weight_bytes = os.path.getsize(model_path) - gpu_weight_bytes
+                else:
+                    gpu_weight_bytes = 0
+                    cpu_weight_bytes = os.path.getsize(model_path)
+
+                gpu_weights_gb = gpu_weight_bytes / (1024 ** 3)
+                cpu_weights_gb = cpu_weight_bytes / (1024 ** 3)
+
+                # Total RAM: CPU weights + KV cache + small buffer
+                weight_residency_buffer_gb = min(2.0, file_size_gb * 0.05)
+                ram_gb = cpu_weights_gb + kv_cache_gb + weight_residency_buffer_gb + 2.0  # headroom
+
+                # GPU RAM: GPU weights + KV cache (KV usually on GPU when offloading)
+                gpu_ram_gb = gpu_weights_gb + kv_cache_gb
+
+                memory_reqs = {
+                    "ram_gb": max(ram_gb, 8.0),
+                    "gpu_ram_gb": gpu_ram_gb,
+                    "kv_cache_gb": kv_cache_gb,
+                    "weights_gb": file_size_gb
+                }
+
+                logger.info(
+                    f"Calculated memory for {model_path}: RAM={memory_reqs['ram_gb']:.2f}GB, "
+                    f"GPU={memory_reqs['gpu_ram_gb']:.2f}GB, KV={kv_cache_gb:.2f}GB, "
+                    f"ctx={context_length}, gpu_layers={gpu_layers_clamped}"
+                )
+
+            except Exception as e:
+                logger.warning(f"GGUF memory calculation failed for {model_path}: {e}, using file-size fallback")
+                # File-size fallback
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                fallback_ram_gb = file_size_gb * 1.25 + 4.0
+                memory_reqs = {
+                    "ram_gb": max(fallback_ram_gb, 8.0),
+                    "gpu_ram_gb": 0.0,
+                    "kv_cache_gb": 0.0,
+                    "weights_gb": file_size_gb
+                }
+
+        elif backend in ["mlx-lm", "image-generation"]:
+            # For non-GGUF backends, use file-size based estimation if model path exists
+            if model_path and os.path.exists(model_path):
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                # More conservative estimate for non-GGUF models
+                memory_reqs = {
+                    "ram_gb": max(file_size_gb * 1.5 + 4.0, 8.0),
+                    "gpu_ram_gb": 0.0,  # Assume CPU-only for now
+                    "kv_cache_gb": 0.0,
+                    "weights_gb": file_size_gb
+                }
+            else:
+                logger.warning(f"No model path for {backend} backend, using default memory estimate")
+
+        return memory_reqs
+
+    def _get_scalar_field(self, reader, key: str) -> Optional[object]:
+        """Extract scalar field from GGUF reader (similar to gguf-mem-info.py)."""
+        field = reader.get_field(key)
+        if field is None:
+            return None
+        val = field.contents()
+        # strings and scalars are fine
+        if isinstance(val, (str, bytes, int, float)):
+            return val
+        # Handle arrays/lists - for attention.head_count_kv, use max value
+        try:
+            if hasattr(val, "__len__") and len(val) > 0:
+                if len(val) == 1:
+                    return val[0]
+                elif key.endswith("attention.head_count_kv"):
+                    # For KV heads, use the maximum value (some layers may have 0)
+                    return max(val)
+                else:
+                    # For other arrays, try to use the first element
+                    return val[0]
+        except TypeError:
+            pass
+        return val
+
+    def _calculate_model_memory_requirements(self, ai_service: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Calculate and return detailed memory requirements for a model.
+        Returns dict with: ram_gb, gpu_ram_gb, kv_cache_gb, weights_gb
+
+        Uses GGUF metadata when available, falls back to file-size heuristics.
+        """
+        backend = ai_service.get("backend", "gguf")
+        model_path = ai_service.get("model")
+
+        # Get context length from config or default
+        context_length = ai_service.get("context_length", DEFAULT_CONFIG.model.DEFAULT_CONTEXT_LENGTH)
+
+        # Get GPU layers from config (default to full offload for GGUF)
+        gpu_layers = ai_service.get("gpu_layers", 9999 if backend == "gguf" else 0)
+
+        # Initialize with conservative defaults
+        memory_reqs = {
+            "ram_gb": 12.0,
+            "gpu_ram_gb": 0.0,
+            "kv_cache_gb": 0.0,
+            "weights_gb": 0.0
+        }
+
+        if backend == "gguf" and model_path and os.path.exists(model_path):
+            try:
+                import gguf
+                try:
+                    reader = gguf.GGUFReader(model_path)
+                except Exception:
+                    with open(model_path, "rb") as f:
+                        reader = gguf.GGUFReader(f)
+
+                # Extract metadata using gguf-mem-info.py approach
+                arch = self._get_scalar_field(reader, "general.architecture")
+                if arch is None:
+                    raise RuntimeError("general.architecture not found in GGUF metadata")
+
+                arch = str(arch)
+                prefix = arch
+
+                def fp(suffix: str) -> Optional[int]:
+                    v = self._get_scalar_field(reader, f"{prefix}.{suffix}")
+                    return int(v) if v is not None else None
+
+                n_layer = fp("block_count")
+                n_embd = fp("embedding_length")
+                n_head = fp("attention.head_count")
+                n_head_kv = fp("attention.head_count_kv") or n_head
+
+                if n_layer is None or n_embd is None:
+                    raise RuntimeError("Missing n_layer or n_embd in GGUF metadata")
+
+                # KV cache calculation (same as gguf-mem-info.py)
+                kv_bytes_per_elem = 2  # Default f16
+                kv_dtype = ai_service.get("kv_dtype", "f16")
+                if isinstance(kv_dtype, str):
+                    kv_dtype_l = kv_dtype.lower()
+                    if kv_dtype_l in ("f16", "bf16"):
+                        kv_bytes_per_elem = 2
+                    elif kv_dtype_l in ("f32", "float32"):
+                        kv_bytes_per_elem = 4
+                    elif kv_dtype_l in ("q8", "q8_kv", "int8"):
+                        kv_bytes_per_elem = 1
+
+                kv_bytes = 2 * n_layer * context_length * n_embd * kv_bytes_per_elem
+                kv_cache_gb = kv_bytes / (1024 ** 3)
+
+                # File size for weights
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+
+                # GPU/CPU split calculation (similar to gguf-mem-info.py)
+                gpu_layers_clamped = max(0, min(gpu_layers, n_layer))
+                if n_layer and gpu_layers_clamped > 0:
+                    frac = float(gpu_layers_clamped) / float(n_layer)
+                    gpu_weight_bytes = int(os.path.getsize(model_path) * frac * 0.9)  # ~90% weights are per-layer
+                    cpu_weight_bytes = os.path.getsize(model_path) - gpu_weight_bytes
+                else:
+                    gpu_weight_bytes = 0
+                    cpu_weight_bytes = os.path.getsize(model_path)
+
+                gpu_weights_gb = gpu_weight_bytes / (1024 ** 3)
+                cpu_weights_gb = cpu_weight_bytes / (1024 ** 3)
+
+                # Total RAM: CPU weights + KV cache + small buffer
+                weight_residency_buffer_gb = min(2.0, file_size_gb * 0.05)
+                ram_gb = cpu_weights_gb + kv_cache_gb + weight_residency_buffer_gb + 2.0  # headroom
+
+                # GPU RAM: GPU weights + KV cache (KV usually on GPU when offloading)
+                gpu_ram_gb = gpu_weights_gb + kv_cache_gb
+
+                memory_reqs = {
+                    "ram_gb": max(ram_gb, 8.0),
+                    "gpu_ram_gb": gpu_ram_gb,
+                    "kv_cache_gb": kv_cache_gb,
+                    "weights_gb": file_size_gb
+                }
+
+                logger.info(
+                    f"Calculated memory for {model_path}: RAM={memory_reqs['ram_gb']:.2f}GB, "
+                    f"GPU={memory_reqs['gpu_ram_gb']:.2f}GB, KV={kv_cache_gb:.2f}GB, "
+                    f"ctx={context_length}, gpu_layers={gpu_layers_clamped}"
+                )
+
+            except Exception as e:
+                logger.warning(f"GGUF memory calculation failed for {model_path}: {e}, using file-size fallback")
+                # File-size fallback
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                fallback_ram_gb = file_size_gb * 1.25 + 4.0
+                memory_reqs = {
+                    "ram_gb": max(fallback_ram_gb, 8.0),
+                    "gpu_ram_gb": 0.0,
+                    "kv_cache_gb": 0.0,
+                    "weights_gb": file_size_gb
+                }
+
+        elif backend in ["mlx-lm", "image-generation"]:
+            # For non-GGUF backends, use file-size based estimation if model path exists
+            if model_path and os.path.exists(model_path):
+                file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
+                # More conservative estimate for non-GGUF models
+                memory_reqs = {
+                    "ram_gb": max(file_size_gb * 1.5 + 4.0, 8.0),
+                    "gpu_ram_gb": 0.0,  # Assume CPU-only for now
+                    "kv_cache_gb": 0.0,
+                    "weights_gb": file_size_gb
+                }
+            else:
+                logger.warning(f"No model path for {backend} backend, using default memory estimate")
+
+        return memory_reqs
+
     def _estimate_model_ram_gb(self, ai_service: Dict[str, Any], context_length_override: Optional[int] = None) -> float:
         """Estimate RAM needed to load a model.
         Priority:
-        1) Use explicit 'estimated_ram_gb' if provided in service config
-        2) For GGUF models, base on model file size with overhead multiplier
-        3) Fallback default
+        1) Use stored 'memory_requirements' if available
+        2) Use explicit 'estimated_ram_gb' if provided in service config
+        3) For GGUF models, base on model file size with overhead multiplier
+        4) Fallback default
         """
+        # First priority: use pre-calculated memory requirements
+        if "memory_requirements" in ai_service and ai_service["memory_requirements"]:
+            stored_ram = ai_service["memory_requirements"].get("ram_gb")
+            if stored_ram is not None:
+                # If context override provided, use stored values as-is (ignore context difference for performance)
+                if context_length_override is not None:
+                    configured_ctx = ai_service.get("context_length", DEFAULT_CONFIG.model.DEFAULT_CONTEXT_LENGTH)
+                    if context_length_override != configured_ctx:
+                        logger.info(f"Context override provided ({context_length_override} vs configured {configured_ctx}), "
+                                  f"using stored memory estimate {stored_ram:.2f}GB (may be conservative)")
+                return stored_ram
+
+        # Fallback to original estimation logic
         try:
             if "estimated_ram_gb" in ai_service and ai_service["estimated_ram_gb"] is not None:
                 return float(ai_service["estimated_ram_gb"])  # trusted override
@@ -736,72 +1505,31 @@ class EternalZooManager:
                     with open(model_path, "rb") as f:
                         reader = gguf.GGUFReader(f)  # type: ignore
 
-                # Try multiple common metadata keys for layer and embedding size
-                meta_get = getattr(reader, "get_value", None)
-                n_layer = None
-                n_embd = None
-                if callable(meta_get):
-                    for key in [
-                        "llama.block_count",
-                        "llama.layers",
-                        "general.block_count",
-                        "general.layers",
-                    ]:
-                        try:
-                            val = meta_get(key)
-                            if isinstance(val, (int, float)):
-                                n_layer = int(val)
-                                break
-                        except Exception:
-                            pass
-                    for key in [
-                        "llama.embedding_length",
-                        "llama.hidden_size",
-                        "general.embedding_length",
-                        "general.hidden_size",
-                    ]:
-                        try:
-                            val = meta_get(key)
-                            if isinstance(val, (int, float)):
-                                n_embd = int(val)
-                                break
-                        except Exception:
-                            pass
+                # Use the same simple approach as gguf-mem-info.py
+                arch = self._get_scalar_field(reader, "general.architecture")
+                if arch is None:
+                    raise RuntimeError("general.architecture not found in GGUF metadata")
 
-                # If metadata unavailable, try to use configuration values before falling back
-                if not n_layer or not n_embd:
-                    n_layer_cfg = None
-                    n_embd_cfg = None
-                    try:
-                        for key in [
-                            "n_layer", "num_layers", "layers", "llama.block_count", "general.block_count"
-                        ]:
-                            if key in ai_service and ai_service.get(key) is not None:
-                                n_layer_cfg = int(ai_service.get(key))
-                                break
-                    except Exception:
-                        n_layer_cfg = None
+                arch = str(arch)
+                prefix = arch  # e.g. 'llama', 'gemma', 'qwen3moe', etc.
 
-                    try:
-                        for key in [
-                            "n_embd", "hidden_size", "embedding_length", "general.embedding_length"
-                        ]:
-                            if key in ai_service and ai_service.get(key) is not None:
-                                n_embd_cfg = int(ai_service.get(key))
-                                break
-                    except Exception:
-                        n_embd_cfg = None
+                logger.info(f"[GGUF DEBUG] Architecture detected: {arch}, using prefix: {prefix}")
 
-                    if n_layer_cfg and n_embd_cfg:
-                        n_layer = n_layer_cfg
-                        n_embd = n_embd_cfg
-                        logger.info(f"Using config-supplied metadata: n_layer={n_layer}, n_embd={n_embd}")
-                        try:
-                            print(f"[RAM EST META CONFIG] n_layer={n_layer} n_embd={n_embd}")
-                        except Exception:
-                            pass
-                    else:
-                        raise RuntimeError("gguf metadata missing for n_layer or n_embd")
+                def fp(suffix: str) -> Optional[int]:
+                    key = f"{prefix}.{suffix}"
+                    v = self._get_scalar_field(reader, key)
+                    logger.debug(f"[GGUF DEBUG] Tried key '{key}' -> {v}")
+                    return int(v) if v is not None else None
+
+                n_layer = fp("block_count")
+                n_embd = fp("embedding_length")
+                n_head = fp("attention.head_count")
+                n_head_kv = fp("attention.head_count_kv") or n_head
+
+                logger.info(f"[GGUF DEBUG] Extracted metadata: n_layer={n_layer}, n_embd={n_embd}, n_head={n_head}, n_head_kv={n_head_kv}")
+
+                if n_layer is None or n_embd is None:
+                    raise RuntimeError(f"GGUF metadata missing for n_layer ({n_layer}) or n_embd ({n_embd}) - architecture: {arch}")
 
                 # Assume f16 KV cache unless overridden by runtime flags or config
                 bytes_per_element = 2
@@ -822,28 +1550,23 @@ class EternalZooManager:
                 except Exception:
                     # Ignore malformed overrides and keep default
                     pass
-                logger.info(f"GGUF metadata: n_layer={n_layer}, n_embd={n_embd}, bytes_per_element={bytes_per_element}")
-                try:
-                    print(f"[RAM EST META] n_layer={n_layer} n_embd={n_embd} bytes_per_element={bytes_per_element}")
-                except Exception:
-                    pass
+
+                logger.info(f"[GGUF DEBUG] Using bytes_per_element={bytes_per_element} for KV cache")
                 kv_cache_bytes = 2 * n_layer * int(context_length) * n_embd * bytes_per_element
                 kv_cache_gb = kv_cache_bytes / (1024 ** 3)
 
                 # Weight residency: mostly mmapped, but budget a small residency buffer
                 file_size_gb = os.path.getsize(model_path) / (1024 ** 3)
                 weight_residency_buffer_gb = min(2.0, file_size_gb * 0.05)
+
                 logger.info(
-                    f"GGUF calc parts: file_size={file_size_gb:.2f}GB, kv_cache={kv_cache_gb:.2f}GB, weight_buffer={weight_residency_buffer_gb:.2f}GB"
+                    f"[GGUF DEBUG] Calculation: layers={n_layer}, emb={n_embd}, ctx={context_length}, "
+                    f"file_size={file_size_gb:.2f}GB, kv_cache={kv_cache_gb:.2f}GB, weight_buffer={weight_residency_buffer_gb:.2f}GB"
                 )
-                try:
-                    print(f"[RAM EST PARTS] file_size={file_size_gb:.2f}GB kv_cache={kv_cache_gb:.2f}GB weight_buffer={weight_residency_buffer_gb:.2f}GB")
-                except Exception:
-                    pass
 
                 estimate_gb = kv_cache_gb + weight_residency_buffer_gb + 2.0  # extra headroom
                 logger.info(
-                    f"GGUF estimate using metadata: layers={n_layer}, emb={n_embd}, ctx={context_length}, "
+                    f"GGUF estimate using metadata: arch={arch}, layers={n_layer}, emb={n_embd}, ctx={context_length}, "
                     f"kv~{kv_cache_gb:.2f}GB, buffer~{weight_residency_buffer_gb:.2f}GB => total~{estimate_gb:.2f}GB"
                 )
             except Exception as e:
@@ -1143,21 +1866,33 @@ class EternalZooManager:
             logger.error(self.last_switch_error)
             return False
         
+        # Log memory state before termination
+        pre_term_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        gpu_memory_before = self._get_gpu_memory_usage()
+        logger.info(f"Memory before model termination: RAM={pre_term_ram_gb:.2f}GB, GPU={gpu_memory_before}")
+
         active_pid = active_ai_service.get("pid", None)
         if active_pid and psutil.pid_exists(active_pid):
             # Terminate current model process first
+            logger.info(f"Terminating active model process (PID: {active_pid})")
             await self._terminate_process_safely_async(active_pid, "EternalZoo AI Service", timeout=self.PROCESS_TERM_TIMEOUT)
-            # Wait for memory to stabilize up to a short window
-            logger.info("Waiting up to 3s for memory to stabilize after termination...")
-            start_ts = time.time()
-            last_avail = psutil.virtual_memory().available
-            while time.time() - start_ts < 3.0:
-                await asyncio.sleep(0.25)
-                cur_avail = psutil.virtual_memory().available
-                # Break early if available memory rises by >256MB indicating reclaim
-                if cur_avail - last_avail > 256 * 1024 * 1024:
-                    break
-                last_avail = cur_avail
+
+            # Use async callback-based memory cleanup monitoring
+            platform_info = self._get_platform_info()
+            logger.info(f"Using {platform_info['gpu_vendor']} cleanup monitoring on {platform_info['os']}")
+
+            # Monitor cleanup completion with platform-specific callbacks
+            cleanup_success = await self._monitor_memory_cleanup_async(
+                platform_info,
+                pre_term_ram_gb,
+                float(gpu_memory_before.split('/')[0]) if '/' in gpu_memory_before else 0
+            )
+
+            # Log final memory state
+            post_term_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+            gpu_memory_after_term = self._get_gpu_memory_usage()
+            ram_reclaimed = post_term_ram_gb - pre_term_ram_gb
+            logger.info(f"Memory after model termination: RAM={post_term_ram_gb:.2f}GB (+{ram_reclaimed:.2f}GB), GPU={gpu_memory_after_term}")
         else:
             logger.warning(f"Active model {active_ai_service.get('model_id', 'unknown')} not found")
 
@@ -1182,9 +1917,26 @@ class EternalZooManager:
         available_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
         configured_context = target_ai_service.get("context_length", 32768)
         eff_ctx = effective_ctx_override if effective_ctx_override is not None else configured_context
+
+        # Log detailed memory breakdown
+        memory_reqs = target_ai_service.get("memory_requirements", {})
+        ram_needed = memory_reqs.get("ram_gb", model_memory_gb)
+        gpu_needed = memory_reqs.get("gpu_ram_gb", 0.0)
+        kv_cache = memory_reqs.get("kv_cache_gb", 0.0)
+        weights = memory_reqs.get("weights_gb", 0.0)
+
         logger.info(
-            f"Memory check for {target_model_id}: required={model_memory_gb:.2f}GB, available RAM={available_ram_gb:.2f}GB, "
-            f"ctx_used={eff_ctx}, ctx_configured={configured_context}, ctx_override={effective_ctx_override}"
+            f"🔄 MODEL SWITCH MEMORY CHECK for {target_model_id}:"
+        )
+        logger.info(
+            f"   Required: RAM={ram_needed:.2f}GB, GPU={gpu_needed:.2f}GB | "
+            f"Available: RAM={available_ram_gb:.2f}GB"
+        )
+        logger.info(
+            f"   Breakdown: Weights={weights:.2f}GB, KV Cache={kv_cache:.2f}GB, Context={eff_ctx}"
+        )
+        logger.info(
+            f"   Context: configured={configured_context}, override={effective_ctx_override}, used={eff_ctx}"
         )
 
         if available_ram_gb < model_memory_gb:
@@ -1195,24 +1947,39 @@ class EternalZooManager:
             logger.error(self.last_switch_error)
             return False
 
-        # Optional: Linux/NVIDIA VRAM check using pynvml if available
-        if sys.platform.startswith("linux"):
+        # Optional: GPU VRAM check using modern libraries
+        if self._get_platform_info()['gpu_present']:
             try:
-                import pynvml  # type: ignore
-                pynvml.nvmlInit()
-                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                # Try modern nvidia-ml-py first
+                try:
+                    import nvidia_ml_py as nvml
+                except ImportError:
+                    import pynvml as nvml
+
+                nvml.nvmlInit()
+                handle = nvml.nvmlDeviceGetHandleByIndex(0)
+                info = nvml.nvmlDeviceGetMemoryInfo(handle)
                 available_vram_gb = info.free / (1024 ** 3)
-                logger.info(f"VRAM check: available VRAM={available_vram_gb:.2f}GB")
-                if available_vram_gb < model_memory_gb:
+
+                # Use stored GPU memory requirements if available, otherwise use RAM estimate
+                gpu_memory_required = target_ai_service.get("memory_requirements", {}).get("gpu_ram_gb", model_memory_gb)
+                logger.info(f"🔄 MODEL SWITCH GPU CHECK for {target_model_id}: required={gpu_memory_required:.2f}GB, available VRAM={available_vram_gb:.2f}GB")
+
+                if available_vram_gb < gpu_memory_required:
                     self.last_switch_error = (
-                        f"Insufficient VRAM for {target_model_id} - required {model_memory_gb:.2f}GB, "
+                        f"Insufficient VRAM for {target_model_id} - required {gpu_memory_required:.2f}GB, "
                         f"available VRAM {available_vram_gb:.2f}GB"
                     )
-                    logger.error(self.last_switch_error)
+                    logger.error(f"❌ {self.last_switch_error}")
                     return False
+
             except Exception as e:
                 logger.warning(f"VRAM check skipped/unavailable: {e}")
+
+        # Log memory state before starting new model
+        pre_launch_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+        gpu_memory_pre_launch = self._get_gpu_memory_usage()
+        logger.info(f"Memory before launching new model: RAM={pre_launch_ram_gb:.2f}GB, GPU={gpu_memory_pre_launch}")
 
         local_model_port = self._get_free_port()
         # avoid mutating stored command in service info
@@ -1260,6 +2027,7 @@ class EternalZooManager:
         # Clear transient context override
         self.switch_ctx_override = None
 
+        logger.info(f"✅ MODEL SWITCH SUCCESSFUL: {target_model_id} is now active")
         return True
     
     def get_available_models(self) -> List[Dict[str, Any]]:
